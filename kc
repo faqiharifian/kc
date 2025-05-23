@@ -1,0 +1,446 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+IFS=$'\n\t'
+
+function show_help() {
+    cat << EOF
+Usage: kc [options] <subcommand>
+
+Subcommands:
+    pg              Connect to PostgreSQL database
+    mongo           Connect to MongoDB database
+    redis           Connect to Redis database
+    util            Create a utility pod in the specified namespace
+
+Options:
+    -c, --context   Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+
+Description:
+  A helper script to connect to various databases using utility pod.
+EOF
+}
+
+function show_help_pg() {
+    cat << EOF
+Usage: kc [options] pg <app-name>
+
+Options:
+    -c, --context   Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+
+Description:
+  Connect to PostgreSQL database of the specified app.
+EOF
+}
+
+function show_help_mongo() {
+    cat << EOF
+Usage: kc [options] mongo <app-name>
+
+Options:
+    -c, --context   Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+
+Description:
+  Connect to MongoDB database of the specified app.
+EOF
+}
+
+function show_help_redis() {
+    cat << EOF
+Usage: kc [options] redis <app-name>
+
+Options:
+    -c, --context   Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+
+Description:
+  Connect to Redis database of the specified app.
+EOF
+}
+
+function show_help_util() {
+    cat << EOF
+Usage: kc [options] util <namespace>
+
+Options:
+    -c, --context   Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+Description:
+  Create a utility pod in the specified namespace.
+  The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
+  If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
+EOF
+}
+
+function check_dependencies() {
+    local dependencies=("kubectl" "yq" "sed" "awk" "tr" "git" "grep" "xargs" "sort" "uniq")
+    for dep in "${dependencies[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            echo "Error: $dep is not installed." >&2
+            exit 1
+        fi
+    done
+}
+
+function switch_context() {
+    local context="$1"
+    if [[ -z "$context" ]]; then
+        return 0
+    fi
+    local ctx=$(load_config | yq ".ctxs.$context")
+    if [[ -n "$ctx" && "$ctx" != "null" ]]; then
+        context="$ctx"
+    fi
+    kubectl config use-context "$context"
+}
+
+function load_config() {
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/config.yaml"
+    if [[ ! -f "$config_file" ]]; then
+        echo "Config file '$config_file' not found." >&2
+        exit 1
+    fi
+    yq "$config_file"
+}
+
+function validate_config() {
+    local config=$(load_config)
+    if [[ -z "$config" || "$config" == "null" ]]; then
+        echo "Invalid config file '$config_file'." >&2
+        exit 1
+    fi
+
+    local kube_contexts=$(kubectl config get-contexts -o name)
+    local config_contexts=$(echo "$config" | yq ".ctxs | .[]")
+    for ctx in $config_contexts; do
+        if ! echo "$kube_contexts" | grep -q "$ctx"; then
+            echo "Context '$ctx' not found in kubeconfig." >&2
+            exit 1
+        fi
+    done
+
+    local app_configs=$(echo "$config" | yq ".apps")
+    for app_name in $(echo "$app_configs" | yq 'keys | .[]'); do
+        app=$(echo "$app_configs" | yq ".\"$app_name\"")
+        local deployment_name=$(echo "$app" | yq ".deployment")
+        if [[ -z "$deployment_name" || "$deployment_name" == "null" ]]; then
+            echo "app 'deployment' is missing for '$app_name'" >&2
+            exit 1
+        fi
+        local namespace=$(echo "$app" | yq ".namespace")
+        if [[ -z "$namespace" || "$namespace" == "null" ]]; then
+            echo "app 'namespace' is missing for '$app_name'" >&2
+            exit 1
+        fi
+        
+        local pg_config=$(echo "$app" | yq ".pg")
+        if [[ -n "$pg_config" && "$pg_config" != "null" ]]; then
+            local pg_required_fields=("host" "user" "password" "dbname")
+            for field in "${pg_required_fields[@]}"; do
+                local field_value=$(echo "$pg_config" | yq ".$field")
+                if [[ -z "$field_value" || "$field_value" == "null" ]]; then
+                    echo "pg '$field' is missing for '$app_name'" >&2
+                    exit 1
+                fi
+            done
+        fi
+
+        local mongo_config=$(echo "$app" | yq ".mongo")
+        if [[ -n "$mongo_config" && "$mongo_config" != "null" ]]; then
+            local mongo_required_fields=("host" "user" "password" "dbname")
+            for field in "${mongo_required_fields[@]}"; do
+                local field_value=$(echo "$mongo_config" | yq ".$field")
+                if [[ -z "$field_value" || "$field_value" == "null" ]]; then
+                    echo "mongo '$field' is missing for '$app_name'" >&2
+                    exit 1
+                fi
+            done
+        fi
+
+        local redis_config=$(echo "$app" | yq ".redis")
+        if [[ -n "$redis_config" && "$redis_config" != "null" ]]; then
+            local redis_required_fields=("host")
+            for field in "${redis_required_fields[@]}"; do
+                local field_value=$(echo "$redis_config" | yq ".$field")
+                if [[ -z "$field_value" || "$field_value" == "null" ]]; then
+                    echo "redis '$field' is missing for '$app_name'" >&2
+                    exit 1
+                fi
+            done
+        fi
+    done
+}
+
+function load_config_for_app() {
+    local app_name="$1"
+    local app_config=$(load_config | yq ".apps")
+
+    echo "$app_config" | yq ".$app_name" 
+}
+
+function resolve_config_for_subcommand() {
+    local app_config="$1"
+    local subcommand="$2"
+    local ns=$(echo "$app_config" | yq ".namespace")
+
+    echo "Fetching deployment information for app '$app_name' in namespace '$ns'..." >&2
+
+    local subcommand_config=$(echo "$app_config" | yq ".$subcommand")
+    local deployment_name=$(echo "$app_config" | yq ".deployment")
+    local deployment=$(kubectl get deployment -n "$ns" -o yaml)
+    if [[ -z "$deployment" || "$deployment" == "null" ]]; then
+        echo "Deployment '$deployment_name' not found in namespace '$ns'." >&2
+        exit 1
+    fi
+    local env_vars=$(echo "$deployment" | yq ".items | map(select(.metadata.name | test(\"$deployment_name\"))) | .[0].spec.template.spec.containers | map(select(.name | test (\"$deployment_name\"))) | .[0].env | map({.name:.value}) | .[]")
+    while IFS=":" read -r key value; do
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+
+        if [[ -z "$key" ]]; then
+            continue
+        fi
+
+        subcommand_config=$(echo "$subcommand_config" | sed "s/: $key/: $(printf '%s\n' "$value" | sed 's/[&/\]/\\&/g')/g")
+    done <<< "$env_vars"
+
+    echo "$subcommand_config"
+}
+
+function normalize_pod_name() {
+    local pod_name="$1"
+    local normalized_name=$(echo "$pod_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+    echo "$normalized_name"
+}
+
+function connect_pg() {
+    local git_user=$(git config --get user.name)
+    local app_name=$1
+
+    local app_config=$(load_config_for_app "$app_name")
+    if [[ -z "$app_config" || "$app_config" == "null" ]]; then
+        echo "No configuration found for app '$app_name' in config file." >&2
+        exit 1
+    fi
+    local ns=$(echo "$app_config" | yq ".namespace")
+
+    local config=$(resolve_config_for_subcommand "$app_config" "pg")
+    if [[ -z "$config" || "$config" == "null" ]]; then
+        echo "No pg configuration found for app '$app_name' in config file." >&2
+        exit 1
+    fi
+
+    local host=$(echo "$config" | yq ".host")
+    local port=$(echo "$config" | yq ".port")
+    local user=$(echo "$config" | yq ".user")
+    local password=$(echo "$config" | yq ".password")
+    local dbname=$(echo "$config" | yq ".dbname")
+    if [[ -z "$port" || "$port" == "null" ]]; then
+        port="5432"
+    fi
+
+    local podname=$(normalize_pod_name "util-pg-$app_name-$git_user")
+    kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+
+    echo ""
+    echo "Current context: $(kubectl config current-context)"
+    echo "Connecting to PostgreSQL database using pod: '$podname' in ns: '$ns'..."
+    cmd=$(echo "kubectl run $podname --rm -it --image postgres:16 --restart Never -n $ns --env PGPASSWORD=$password --env PGCONNECT_TIMEOUT=30 -- psql -U $user -h $host $dbname")
+    eval $cmd
+}
+
+function connect_mongo() {
+    local git_user=$(git config --get user.name)
+    local app_name=$1
+
+    local app_config=$(load_config_for_app "$app_name")
+    local ns=$(echo "$app_config" | yq ".namespace")
+
+    local config=$(resolve_config_for_subcommand "$app_config" "mongo")
+    if [[ -z "$config" || "$config" == "null" ]]; then
+        echo "No mongo configuration found for app '$app_name' in config file." >&2
+        exit 1
+    fi
+
+    local host=$(echo "$config" | yq ".host")
+    local port=$(echo "$config" | yq ".port")
+    local user=$(echo "$config" | yq ".user")
+    local password=$(echo "$config" | yq ".password")
+    local dbname=$(echo "$config" | yq ".dbname")
+
+    # Split host and port if host contains ':'
+    if [[ "$host" == *:* ]]; then
+        IFS=':' read -r host port_from_host <<< "$host"
+        host="$host"
+        port="$port_from_host"
+    fi
+    # Set default port if not set
+    if [[ -z "$port" || "$port" == "null" ]]; then
+        port="27017"
+    fi
+
+    local podname=$(normalize_pod_name "util-mongo-$app_name-$git_user")
+    kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+
+    echo ""
+    echo "Current context: $(kubectl config current-context)"
+    echo "Connecting to PostgreSQL database using pod: '$podname' in ns: '$ns'..."
+    cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
+    eval $cmd
+}
+
+function connect_redis() {
+    local git_user=$(git config --get user.name)
+    local app_name=$1
+
+    local app_config=$(load_config_for_app "$app_name")
+    local ns=$(echo "$app_config" | yq ".namespace")
+
+    local config=$(resolve_config_for_subcommand "$app_config" "redis")
+    if [[ -z "$config" || "$config" == "null" ]]; then
+        echo "No redis configuration found for app '$app_name' in config file." >&2
+        exit 1
+    fi
+    local host=$(echo "$config" | yq ".host")
+    host=$(echo "$host" | awk '{print $1}')
+    host=$(echo "$host" | awk -F',' '{print $1}')
+    local port=$(echo "$config" | yq ".port")
+    local password=$(echo "$config" | yq ".password")
+
+    if [[ "$host" == *:* ]]; then
+        IFS=':' read -r host port_from_host <<< "$host"
+        host="$host"
+        port="$port_from_host"
+    fi
+
+    if [[ -z "$port" || "$port" == "null" ]]; then
+        port="6379"
+    fi
+
+    local podname=$(normalize_pod_name "util-redis-$app_name-$git_user")
+    kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+
+    echo ""
+    echo "Current context: $(kubectl config current-context)"
+    echo "Connecting to Redis database using pod: '$podname' in ns: '$ns'..."
+    cmd=$(echo "kubectl run $podname --rm -it --image redis:latest --restart Never -n $ns --env REDISCLI_AUTH=$password -- redis-cli -c -h $host -p $port")
+    echo "Press 'Shift + r' to run redis-cli command after 'If you don't see a command prompt, try pressing enter.'"
+    eval $cmd
+}
+
+function connect_util() {
+    local user=$(git config --get user.name)
+    local ns=$1
+
+    if [[ "$ns" =~ ^[0-9]+$ ]]; then
+        ns="a$(printf '%06d' "$ns")"
+    fi
+
+    local podname=$(normalize_pod_name "util-$user")
+    kubectl delete pod "$podname" -n $ns --ignore-not-found=true
+
+    echo "Creating utility pod: $podname in namespace '$ns'..."
+    cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns bash")
+    eval $cmd
+}
+
+function cleanup() {
+    local app_config=$(load_config | yq ".apps")
+    local namespaces=$(echo "$app_config" | yq '.[].namespace' | sort | uniq)
+    local user=$(git config --get user.name)
+    user=$(normalize_pod_name "$user")
+    for ns in $namespaces; do
+        local pods=$(kubectl get pods -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "util.*$user")
+        if [[ -z "$pods" ]]; then
+            continue
+        fi
+        echo "Deleting pods in namespace '$ns':"
+        for pod in $pods; do
+            echo "  - $pod"
+            kubectl delete pod "$pod" -n "$ns" --ignore-not-found=true
+        done
+    done
+}
+
+if [[ $# -eq 0 ]]; then
+    show_help
+    exit 0
+fi
+
+check_dependencies
+
+# Parse option if provided
+CONTEXT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--context)
+            if [[ -n "${2:-}" ]]; then
+                CONTEXT="$2"
+                shift 2
+            fi
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+switch_context "$CONTEXT"
+
+validate_config
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+if [[ -z "${1:-}" ]]; then
+    exit 0
+fi
+case "$1" in
+    pg)
+        if [[ $# -ne 2 ]]; then
+            show_help_pg
+            exit 1
+        fi
+        connect_pg "$2"
+        ;;
+    mongo)
+        if [[ $# -ne 2 ]]; then
+            show_help_mongo
+            exit 1
+        fi
+        connect_mongo "$2"
+        ;;
+    redis)
+        if [[ $# -ne 2 ]]; then
+            show_help_redis
+            exit 1
+        fi
+        connect_redis "$2"
+        ;;
+    util)
+        if [[ $# -ne 2 ]]; then
+            show_help_util
+            exit 1
+        fi
+        
+        connect_util "$2"
+        ;;
+    cleanup)
+        cleanup
+        ;;
+    *)
+        echo "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac
