@@ -12,6 +12,7 @@ Subcommands:
     mongo           Connect to MongoDB database
     redis           Connect to Redis database
     util            Create a utility pod in the specified namespace
+    cleanup         Delete utility pods in all namespaces set in config file
 
 Options:
     -c, --context   Specify the Kubernetes context to use. 
