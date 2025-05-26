@@ -33,6 +33,7 @@ kc [options] <subcommand> [args]
 
 ### Options
 - `-c`, `--context`  Specify the Kubernetes context to use. Can be a full context name or an alias set in `~/.kc/config.yaml`.
+- `-v`, `--verbose`  Enable verbose mode to print commands being executed.
 
 ### Subcommands
 - `pg <app-name>`      Connect to PostgreSQL database of the specified app.

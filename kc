@@ -2,6 +2,7 @@
 
 set -euo pipefail
 IFS=$'\n\t'
+VERBOSE=false
 
 function show_help() {
     cat << EOF
@@ -13,11 +14,13 @@ Subcommands:
     redis           Connect to Redis database
     util            Create a utility pod in the specified namespace
     cleanup         Delete utility pods in all namespaces set in config file
+    <anycommand>    Execute whatever command you give. Usually used with -c/--context option.
 
 Options:
     -c, --context   Specify the Kubernetes context to use. 
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
+    -v, --verbose   Enable verbose mode to print commands being executed.
 
 Description:
   A helper script to connect to various databases using utility pod.
@@ -79,6 +82,14 @@ Description:
   The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
   If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
 EOF
+}
+
+function print_command() {
+    cmd=$@
+    echo ""
+    if [[ "$VERBOSE" == true ]]; then
+        echo "> $cmd"
+    fi
 }
 
 function check_dependencies() {
@@ -255,6 +266,7 @@ function connect_pg() {
     echo "Current context: $(kubectl config current-context)"
     echo "Connecting to PostgreSQL database using pod: '$podname' in ns: '$ns'..."
     cmd=$(echo "kubectl run $podname --rm -it --image postgres:16 --restart Never -n $ns --env PGPASSWORD=$password --env PGCONNECT_TIMEOUT=30 -- psql -U $user -h $host $dbname")
+    print_command "$cmd"
     eval $cmd
 }
 
@@ -295,6 +307,7 @@ function connect_mongo() {
     echo "Current context: $(kubectl config current-context)"
     echo "Connecting to PostgreSQL database using pod: '$podname' in ns: '$ns'..."
     cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
+    print_command "$cmd"
     eval $cmd
 }
 
@@ -334,6 +347,7 @@ function connect_redis() {
     echo "Connecting to Redis database using pod: '$podname' in ns: '$ns'..."
     cmd=$(echo "kubectl run $podname --rm -it --image redis:latest --restart Never -n $ns --env REDISCLI_AUTH=$password -- redis-cli -c -h $host -p $port")
     echo "Press 'Shift + r' to run redis-cli command after 'If you don't see a command prompt, try pressing enter.'"
+    print_command "$cmd"
     eval $cmd
 }
 
@@ -350,6 +364,7 @@ function connect_util() {
 
     echo "Creating utility pod: $podname in namespace '$ns'..."
     cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns bash")
+    print_command "$cmd"
     eval $cmd
 }
 
@@ -387,6 +402,10 @@ while [[ $# -gt 0 ]]; do
                 CONTEXT="$2"
                 shift 2
             fi
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
             ;;
         *)
             break
@@ -440,8 +459,7 @@ case "$1" in
         cleanup
         ;;
     *)
-        echo "Unknown subcommand: $1"
-        show_help
-        exit 1
+        print_command "$@"
+        "$@"
         ;;
 esac
