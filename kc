@@ -3,12 +3,13 @@
 set -euo pipefail
 IFS=$'\n\t'
 VERBOSE=false
+PF=false
 
 function show_help() {
     cat << EOF
-Usage: kc [options] <subcommand>
+Usage: kc [options] <command> [<args>]
 
-Subcommands:
+Commands:
     pg              Connect to PostgreSQL database
     mongo           Connect to MongoDB database
     redis           Connect to Redis database
@@ -16,8 +17,13 @@ Subcommands:
     cleanup         Delete utility pods in all namespaces set in config file
     <anycommand>    Execute whatever command you give. Usually used with -c/--context option.
 
+Use "kc help <command>" for more information about a command.
+
 Options:
     -c, --context   Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+    -<context>      Specify the Kubernetes context to use. 
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
     -v, --verbose   Enable verbose mode to print commands being executed.
@@ -35,6 +41,15 @@ Options:
     -c, --context   Specify the Kubernetes context to use. 
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
+    -<context>      Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+    -pf, --port-forward
+                    Enable port forwarding for the PostgreSQL database.
+                    This will create a pod that forwards the PostgreSQL port to your local machine.
+                    You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
+                    The default port is 15432, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
+     -v, --verbose  Enable verbose mode to print commands being executed.
 
 Description:
   Connect to PostgreSQL database of the specified app.
@@ -49,6 +64,15 @@ Options:
     -c, --context   Specify the Kubernetes context to use. 
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
+    -<context>      Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+    -pf, --port-forward
+                    Enable port forwarding for the PostgreSQL database.
+                    This will create a pod that forwards the PostgreSQL port to your local machine.
+                    You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
+                    The default port is 127017, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
+     -v, --verbose  Enable verbose mode to print commands being executed.
 
 Description:
   Connect to MongoDB database of the specified app.
@@ -63,6 +87,15 @@ Options:
     -c, --context   Specify the Kubernetes context to use. 
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
+    -<context>      Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+    -pf, --port-forward
+                    Enable port forwarding for the PostgreSQL database.
+                    This will create a pod that forwards the PostgreSQL port to your local machine.
+                    You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
+                    The default port is 16379, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
+     -v, --verbose  Enable verbose mode to print commands being executed.
 
 Description:
   Connect to Redis database of the specified app.
@@ -71,14 +104,18 @@ EOF
 
 function show_help_util() {
     cat << EOF
-Usage: kc [options] util <namespace>
+Usage: kc [options] util [<namespace>]
 
 Options:
     -c, --context   Specify the Kubernetes context to use. 
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
+    -<context>      Specify the Kubernetes context to use. 
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
 Description:
   Create a utility pod in the specified namespace.
+  If no namespace is specified, it will use the first namespace found in the config file.
   The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
   If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
 EOF
@@ -119,6 +156,14 @@ function load_config() {
     if [[ ! -f "$config_file" ]]; then
         echo "Config file '$config_file' not found." >&2
         exit 1
+    fi
+    yq "$config_file"
+}
+
+function load_namespaces_config() {
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
+    if [[ ! -f "$config_file" ]]; then
+        echo "# DO NOT EDIT. This file is auto-generated by kc." > "$config_file" 2>/dev/null
     fi
     yq "$config_file"
 }
@@ -259,8 +304,19 @@ function connect_pg() {
         port="5432"
     fi
 
+    local pfport=$(echo "$config" | yq ".pfport")
+    if [[ -z "$pfport" || "$pfport" == "null" ]]; then
+        pfport="15432"
+    fi
+
     local podname=$(normalize_pod_name "util-pg-$app_name-$git_user")
     kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+    persist_namespace "$ns"
+
+    if [[ "$PF" == true ]]; then
+        port_forward $podname $ns $host $port $pfport
+        return
+    fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
@@ -300,12 +356,23 @@ function connect_mongo() {
         port="27017"
     fi
 
+    local pfport=$(echo "$config" | yq ".pfport")
+    if [[ -z "$pfport" || "$pfport" == "null" ]]; then
+        pfport="127017"
+    fi
+
     local podname=$(normalize_pod_name "util-mongo-$app_name-$git_user")
     kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+    persist_namespace "$ns"
+
+    if [[ "$PF" == true ]]; then
+        port_forward $podname $ns $host $port $pfport
+        return
+    fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to PostgreSQL database using pod: '$podname' in ns: '$ns'..."
+    echo "Connecting to MongoDB database using pod: '$podname' in ns: '$ns'..."
     cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
     print_command "$cmd"
     eval $cmd
@@ -339,8 +406,19 @@ function connect_redis() {
         port="6379"
     fi
 
+    local pfport=$(echo "$config" | yq ".pfport")
+    if [[ -z "$pfport" || "$pfport" == "null" ]]; then
+        pfport="16379"
+    fi
+
     local podname=$(normalize_pod_name "util-redis-$app_name-$git_user")
     kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+    persist_namespace "$ns"
+
+    if [[ "$PF" == true ]]; then
+        port_forward $podname $ns $host $port $pfport
+        return
+    fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
@@ -361,6 +439,7 @@ function connect_util() {
 
     local podname=$(normalize_pod_name "util-$user")
     kubectl delete pod "$podname" -n $ns --ignore-not-found=true
+    persist_namespace "$ns"
 
     echo "Creating utility pod: $podname in namespace '$ns'..."
     cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns bash")
@@ -368,22 +447,107 @@ function connect_util() {
     eval $cmd
 }
 
+function port_forward() {
+    local podname=$1
+    local ns=$2
+    local host=$3
+    local port=$4
+    local pfport=$5
+
+    kubectl run $podname --image alpine/socat --restart Never -n $ns -- TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port
+    kubectl wait --for=condition=Ready pod/$podname -n $ns
+    kubectl port-forward -n $ns pod/$podname $pfport:$port; kubectl delete pod $podname -n $ns
+}
+
 function cleanup() {
-    local app_config=$(load_config | yq ".apps")
-    local namespaces=$(echo "$app_config" | yq '.[].namespace' | sort | uniq)
+    local config=$(load_namespaces_config)
     local user=$(git config --get user.name)
     user=$(normalize_pod_name "$user")
-    for ns in $namespaces; do
-        local pods=$(kubectl get pods -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "util.*$user")
-        if [[ -z "$pods" ]]; then
-            continue
-        fi
-        echo "Deleting pods in namespace '$ns':"
-        for pod in $pods; do
-            echo "  - $pod"
-            kubectl delete pod "$pod" -n "$ns" --ignore-not-found=true
+    local contexts=$(echo "$config" | yq ".pod_namespaces | keys | .[]" 2>/dev/null || true)
+
+    echo ""
+    echo "Starting cleanup of utility pods..."
+    local pids=()  # Array to store background process IDs
+    
+    for ctx in $contexts; do
+        switch_context "$ctx"
+        local namespaces=$(echo "$config" | yq ".pod_namespaces.\"$ctx\"[]" 2>/dev/null || true)
+        for ns in $namespaces; do
+            local pods=$(kubectl get pods -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "util.*$user")
+            if [[ -z "$pods" ]]; then
+                continue
+            fi
+            echo "ctx: $ctx, ns: $ns"
+            for pod in $pods; do
+                echo "  - Deleting $pod (background)"
+                kubectl delete pod "$pod" -n "$ns" --ignore-not-found=true &
+                pids+=($!)
+            done
         done
+        echo ""
     done
+    
+    # Wait for all background deletions to complete
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        echo "Waiting for ${#pids[@]} deletion(s) to complete..."
+        for pid in "${pids[@]}"; do
+            wait "$pid"
+        done
+        echo "All pod deletions completed."
+    fi
+
+    # Clear out all pod_namespaces from the config file
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
+    tmpfile=$(mktemp)
+    
+    # Keep only the first line (header), delete the rest
+    head -n 1 "$config_file" > "$tmpfile"
+    mv "$tmpfile" "$config_file"
+}
+
+function first_namespace() {
+    load_config | yq ".apps[].namespace" | head -n1
+}
+
+function persist_namespace() {
+    load_namespaces_config > /dev/null
+    local ns="$1"
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
+
+    # Check if last_used is older than 1 day, and call cleanup if so
+    if yq 'has("last_used")' "$config_file" | grep -q true; then
+        last_used=$(yq '.last_used' "$config_file")
+        if [[ -n "$last_used" && "$last_used" != "null" ]]; then
+            last_used_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$last_used" +"%s" 2>/dev/null || date -d "$last_used" +"%s")
+            now_epoch=$(date -u +"%s")
+            if [[ $((now_epoch - last_used_epoch)) -gt 86400 ]]; then
+                cleanup
+            fi
+        fi
+    fi
+
+    # Store current time (ISO 8601) as last_used for this namespace/context
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    tmpfile=$(mktemp)
+    yq ".last_used = \"$now\"" "$config_file" > "$tmpfile"
+    mv "$tmpfile" "$config_file"
+
+    # Get current context
+    local current_context
+    current_context=$(kubectl config current-context)
+
+    # Check if namespace exists in the current Kubernetes cluster
+    if ! kubectl get namespace "$ns" &>/dev/null; then
+        return
+    fi
+
+    # Append namespace to pod_namespaces for the current context if not already present
+    if ! yq ".pod_namespaces.\"$current_context\"[]" "$config_file" 2>/dev/null | grep -Fxq "$ns"; then
+        tmpfile=$(mktemp)
+        yq ".pod_namespaces.\"$current_context\" += [\"$ns\"] | .pod_namespaces.\"$current_context\" |= unique" "$config_file" > "$tmpfile"
+        mv "$tmpfile" "$config_file"
+    fi
 }
 
 if [[ $# -eq 0 ]]; then
@@ -407,8 +571,17 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        -pf|--port-forward)
+            PF=true
+            shift
+            ;;
         *)
-            break
+            if [[ "$1" == -* ]]; then
+                CONTEXT="${1#-}"
+                shift
+            else
+                break
+            fi
             ;;
     esac
 done
@@ -448,15 +621,38 @@ case "$1" in
         connect_redis "$2"
         ;;
     util)
-        if [[ $# -ne 2 ]]; then
-            show_help_util
-            exit 1
+        ns=$(first_namespace)
+        if [[ $# -eq 2 ]]; then
+            ns=$2
         fi
         
-        connect_util "$2"
+        connect_util "$ns"
         ;;
     cleanup)
         cleanup
+        ;;
+    help)
+        if [[ $# -ne 2 ]]; then
+            show_help
+            exit 1
+        fi
+        case "$2" in
+            pg)
+                show_help_pg
+                ;;
+            mongo)
+                show_help_mongo
+                ;;
+            redis)
+                show_help_redis
+                ;;
+            util)
+                show_help_util
+                ;;
+            *)
+                show_help
+                ;;
+        esac
         ;;
     *)
         print_command "$@"
