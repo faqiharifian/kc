@@ -1,0 +1,25 @@
+ctxs:
+  <ctx-alias>: <context-name>
+apps:
+  <app-alias>:
+    deployment: <deployment-name>
+    namespace: <namespace>
+    pg:
+      host: <db-host>
+      port: <db-port>
+      user: <db-user>
+      password: <db-password>
+      dbname: <db-name>
+      pfport: <port-forward-port> # Optional, for port forwarding
+    redis:
+      host: <redis-host>
+      port: <redis-port>
+      password: <redis-password>
+      pfport: <port-forward-port> # Optional, for port forwarding
+    mongo:
+      host: <mongo-host>
+      user: <mongo-user>
+      password: <mongo-password>
+      dbname: <mongo-dbname>
+      pfport: <port-forward-port> # Optional, for port forwarding
+
