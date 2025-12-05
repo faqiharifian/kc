@@ -20,10 +20,10 @@ Commands:
 Use "kc help <command>" for more information about a command.
 
 Options:
-    -c, --context   Specify the Kubernetes context to use. 
+    -c, --context   Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
-    -<context>      Specify the Kubernetes context to use. 
+    -<context>      Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
     -v, --verbose   Enable verbose mode to print commands being executed.
@@ -38,10 +38,10 @@ function show_help_pg() {
 Usage: kc [options] pg <app-name>
 
 Options:
-    -c, --context   Specify the Kubernetes context to use. 
+    -c, --context   Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
-    -<context>      Specify the Kubernetes context to use. 
+    -<context>      Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
     -pf, --port-forward
@@ -61,10 +61,10 @@ function show_help_mongo() {
 Usage: kc [options] mongo <app-name>
 
 Options:
-    -c, --context   Specify the Kubernetes context to use. 
+    -c, --context   Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
-    -<context>      Specify the Kubernetes context to use. 
+    -<context>      Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
     -pf, --port-forward
@@ -84,10 +84,10 @@ function show_help_redis() {
 Usage: kc [options] redis <app-name>
 
 Options:
-    -c, --context   Specify the Kubernetes context to use. 
+    -c, --context   Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
-    -<context>      Specify the Kubernetes context to use. 
+    -<context>      Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
     -pf, --port-forward
@@ -107,10 +107,10 @@ function show_help_util() {
 Usage: kc [options] util [<namespace>]
 
 Options:
-    -c, --context   Specify the Kubernetes context to use. 
+    -c, --context   Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
-    -<context>      Specify the Kubernetes context to use. 
+    -<context>      Specify the Kubernetes context to use.
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
 Description:
@@ -144,10 +144,17 @@ function switch_context() {
     if [[ -z "$context" ]]; then
         return 0
     fi
+
     local ctx=$(load_config | yq ".ctxs.$context")
     if [[ -n "$ctx" && "$ctx" != "null" ]]; then
         context="$ctx"
     fi
+
+    local current_context=$(kubectl config current-context 2>/dev/null)
+    if [[ "$context" == "$current_context" ]]; then
+        return 0
+    fi
+
     kubectl config use-context "$context"
 }
 
@@ -197,7 +204,7 @@ function validate_config() {
             echo "app 'namespace' is missing for '$app_name'" >&2
             exit 1
         fi
-        
+
         local pg_config=$(echo "$app" | yq ".pg")
         if [[ -n "$pg_config" && "$pg_config" != "null" ]]; then
             local pg_required_fields=("host" "user" "password" "dbname")
@@ -240,7 +247,7 @@ function load_config_for_app() {
     local app_name="$1"
     local app_config=$(load_config | yq ".apps")
 
-    echo "$app_config" | yq ".$app_name" 
+    echo "$app_config" | yq ".$app_name"
 }
 
 function resolve_config_for_subcommand() {
@@ -262,12 +269,10 @@ function resolve_config_for_subcommand() {
         key=$(echo "$key" | xargs)
         value=$(echo "$value" | xargs)
 
-        if [[ -z "$key" ]]; then
-            continue
-        fi
+        resolved_value=$(echo "$env_vars" | yq ".$value")
 
-        subcommand_config=$(echo "$subcommand_config" | sed "s/: $key/: $(printf '%s\n' "$value" | sed 's/[&/\]/\\&/g')/g")
-    done <<< "$env_vars"
+        subcommand_config=$(echo "$subcommand_config" | sed "s/: $value/: $(printf '%s\n' "$resolved_value" | sed 's/[&/\]/\\&/g')/g")
+    done <<< "$subcommand_config"
 
     echo "$subcommand_config"
 }
@@ -468,7 +473,7 @@ function cleanup() {
     echo ""
     echo "Starting cleanup of utility pods..."
     local pids=()  # Array to store background process IDs
-    
+
     for ctx in $contexts; do
         switch_context "$ctx"
         local namespaces=$(echo "$config" | yq ".pod_namespaces.\"$ctx\"[]" 2>/dev/null || true)
@@ -486,7 +491,7 @@ function cleanup() {
         done
         echo ""
     done
-    
+
     # Wait for all background deletions to complete
     if [[ ${#pids[@]} -gt 0 ]]; then
         echo "Waiting for ${#pids[@]} deletion(s) to complete..."
@@ -499,7 +504,7 @@ function cleanup() {
     # Clear out all pod_namespaces from the config file
     local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
     tmpfile=$(mktemp)
-    
+
     # Keep only the first line (header), delete the rest
     head -n 1 "$config_file" > "$tmpfile"
     mv "$tmpfile" "$config_file"
@@ -588,8 +593,6 @@ done
 
 switch_context "$CONTEXT"
 
-validate_config
-
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     show_help
     exit 0
@@ -625,7 +628,7 @@ case "$1" in
         if [[ $# -eq 2 ]]; then
             ns=$2
         fi
-        
+
         connect_util "$ns"
         ;;
     cleanup)
