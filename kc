@@ -10,12 +10,13 @@ function show_help() {
 Usage: kc [options] <command> [<args>]
 
 Commands:
-    pg              Connect to PostgreSQL database
-    mongo           Connect to MongoDB database
-    redis           Connect to Redis database
-    util            Create a utility pod in the specified namespace
-    cleanup         Delete utility pods in all namespaces set in config file
-    <anycommand>    Execute whatever command you give. Usually used with -c/--context option.
+    hist [last|<n>]  Show connection history, or reconnect to last or #n
+    pg               Connect to PostgreSQL database
+    mongo            Connect to MongoDB database
+    redis            Connect to Redis database
+    util             Create a utility pod in the specified namespace
+    cleanup          Delete utility pods in all namespaces set in config file
+    <anycommand>     Execute whatever command you give. Usually used with -c/--context option.
 
 Use "kc help <command>" for more information about a command.
 
@@ -317,6 +318,7 @@ function connect_pg() {
     local podname=$(normalize_pod_name "util-pg-$app_name-$git_user")
     kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
     persist_namespace "$ns"
+    record_connection "pg" "$app_name" "$ns"
 
     if [[ "$PF" == true ]]; then
         port_forward $podname $ns $host $port $pfport
@@ -369,6 +371,7 @@ function connect_mongo() {
     local podname=$(normalize_pod_name "util-mongo-$app_name-$git_user")
     kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
     persist_namespace "$ns"
+    record_connection "mongo" "$app_name" "$ns"
 
     if [[ "$PF" == true ]]; then
         port_forward $podname $ns $host $port $pfport
@@ -419,6 +422,7 @@ function connect_redis() {
     local podname=$(normalize_pod_name "util-redis-$app_name-$git_user")
     kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
     persist_namespace "$ns"
+    record_connection "redis" "$app_name" "$ns"
 
     if [[ "$PF" == true ]]; then
         port_forward $podname $ns $host $port $pfport
@@ -514,6 +518,112 @@ function first_namespace() {
     load_config | yq ".apps[].namespace" | head -n1
 }
 
+function record_connection() {
+    local db_type="$1"
+    local app_name="$2"
+    local ns="$3"
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
+    local current_context=$(kubectl config current-context)
+    local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    
+    # Create new history entry as JSON
+    local new_entry=$(cat <<EOF
+{"timestamp": "$now", "context": "$current_context", "type": "$db_type", "app": "$app_name", "namespace": "$ns"}
+EOF
+    )
+    
+    # Prepend to history array, keep only last 20
+    tmpfile=$(mktemp)
+    yq ".history = ([${new_entry}] + (.history // [])) | .history[0:20]" "$config_file" > "$tmpfile"
+    mv "$tmpfile" "$config_file"
+}
+
+function calculate_time_ago() {
+    local timestamp="$1"
+    local then_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +"%s" 2>/dev/null || date -d "$timestamp" +"%s")
+    local now_epoch=$(date -u +"%s")
+    local diff=$((now_epoch - then_epoch))
+    
+    if [[ $diff -lt 60 ]]; then
+        echo "${diff}s ago"
+    elif [[ $diff -lt 3600 ]]; then
+        echo "$((diff / 60))m ago"
+    elif [[ $diff -lt 86400 ]]; then
+        echo "$((diff / 3600))h ago"
+    else
+        echo "$((diff / 86400))d ago"
+    fi
+}
+
+function show_history() {
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
+    local history_count=$(yq ".history | length" "$config_file" 2>/dev/null)
+    
+    if [[ -z "$history_count" || "$history_count" == "null" || "$history_count" == "0" ]]; then
+        echo ""
+        echo "No connection history found."
+        echo ""
+        return
+    fi
+    
+    echo ""
+    echo "Recent Connections:"
+    echo "-------------------"
+    
+    local index=1
+    yq -o json ".history[]" "$config_file" | while read -r entry; do
+        local timestamp=$(echo "$entry" | yq ".timestamp")
+        local context=$(echo "$entry" | yq ".context")
+        local type=$(echo "$entry" | yq ".type")
+        local app=$(echo "$entry" | yq ".app")
+        
+        # Calculate "time ago"
+        local time_ago=$(calculate_time_ago "$timestamp")
+        
+        printf "[%d] %-10s | %-15s | %-6s | %s\n" "$index" "$time_ago" "$context" "$type" "$app"
+        ((index++))
+    done
+    echo ""
+}
+
+function reconnect_from_history() {
+    local index="${1:-1}"  # Default to 1 (last connection)
+    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
+    
+    # Validate index is numeric
+    if ! [[ "$index" =~ ^[0-9]+$ ]]; then
+        echo "Error: Invalid index '$index'. Must be a number." >&2
+        exit 1
+    fi
+    
+    # Get entry (0-indexed internally)
+    local entry=$(yq ".history[$((index - 1))]" "$config_file" 2>/dev/null)
+    
+    if [[ -z "$entry" || "$entry" == "null" ]]; then
+        echo "Error: No connection found at index $index" >&2
+        echo "Run 'kc hist' to see available connections." >&2
+        exit 1
+    fi
+    
+    # Extract connection details
+    local context=$(echo "$entry" | yq ".context")
+    local type=$(echo "$entry" | yq ".type")
+    local app=$(echo "$entry" | yq ".app")
+    
+    echo ""
+    echo "Reconnecting to: $type/$app (context: $context)..."
+    
+    # Switch context and reconnect
+    switch_context "$context"
+    
+    case "$type" in
+        pg) connect_pg "$app" ;;
+        mongo) connect_mongo "$app" ;;
+        redis) connect_redis "$app" ;;
+        *) echo "Unknown database type: $type" >&2; exit 1 ;;
+    esac
+}
+
 function persist_namespace() {
     load_namespaces_config > /dev/null
     local ns="$1"
@@ -602,6 +712,25 @@ if [[ -z "${1:-}" ]]; then
     exit 0
 fi
 case "$1" in
+    hist|history)
+        case "${2:-}" in
+            last)
+                reconnect_from_history 1
+                ;;
+            "")
+                show_history
+                ;;
+            *)
+                if [[ "$2" =~ ^[0-9]+$ ]]; then
+                    reconnect_from_history "$2"
+                else
+                    echo "Error: Unknown hist subcommand '$2'" >&2
+                    echo "Usage: kc hist [last|<number>]" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+        ;;
     pg)
         if [[ $# -ne 2 ]]; then
             show_help_pg
