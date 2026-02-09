@@ -577,8 +577,8 @@ function show_history() {
         # Calculate "time ago"
         local time_ago=$(calculate_time_ago "$timestamp")
         
-        printf "[%d] %-10s | %-20s | %-6s | %s\n" "$((index + 1))" "$time_ago" "$context" "$type" "$app"
-        ((index++))
+        printf "[%d] %-10s | %-70s | %-6s | %s\n" "$((index + 1))" "$time_ago" "$context" "$type" "$app"
+        index=$((index + 1))
     done
     echo ""
 }
