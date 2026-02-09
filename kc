@@ -4,6 +4,7 @@ set -euo pipefail
 IFS=$'\n\t'
 VERBOSE=false
 PF=false
+HISTORY_LIMIT=9
 
 function show_help() {
     cat << EOF
@@ -529,9 +530,9 @@ function record_connection() {
     local current_context=$(kubectl config current-context)
     local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     
-    # Prepend to history array, then limit to 20 entries
+    # Prepend to history array, then limit to configured entries
     local tmpfile=$(mktemp)
-    yq ".history = [{\"timestamp\": \"$now\", \"context\": \"$current_context\", \"type\": \"$db_type\", \"app\": \"$app_name\", \"namespace\": \"$ns\"}] + (.history // [])" "$config_file" | yq '.history |= .[0:20]' > "$tmpfile"
+    yq ".history = [{\"timestamp\": \"$now\", \"context\": \"$current_context\", \"type\": \"$db_type\", \"app\": \"$app_name\", \"namespace\": \"$ns\"}] + (.history // [])" "$config_file" | yq ".history |= .[0:$HISTORY_LIMIT]" > "$tmpfile"
     mv "$tmpfile" "$config_file"
 }
 
