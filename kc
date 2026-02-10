@@ -538,8 +538,16 @@ function record_connection() {
 
 function calculate_time_ago() {
     local timestamp="$1"
-    local then_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +"%s" 2>/dev/null)
-    local now_epoch=$(date -u +"%s")
+    local then_epoch
+    then_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +"%s" 2>/dev/null \
+        || date -d "$timestamp" +"%s" 2>/dev/null \
+        || true)
+    if [[ -z "${then_epoch:-}" ]]; then
+        echo "unknown"
+        return
+    fi
+    local now_epoch
+    now_epoch=$(date -u +"%s")
     local diff=$((now_epoch - then_epoch))
     
     if [[ $diff -lt 60 ]]; then
@@ -555,7 +563,7 @@ function calculate_time_ago() {
 
 function show_history() {
     local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
-    local history_count=$(yq ".history | length" "$config_file" 2>/dev/null)
+    local history_count=$(yq ".history | length" "$config_file" 2>/dev/null || true)
     
     if [[ -z "$history_count" || "$history_count" == "null" || "$history_count" == "0" ]]; then
         echo ""
