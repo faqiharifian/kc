@@ -601,9 +601,15 @@ function reconnect_from_history() {
         echo "Error: Invalid index '$index'. Must be a number." >&2
         exit 1
     fi
+
+    # Enforce index range (1-based for users)
+    if (( index < 1 )); then
+        echo "Error: Invalid index '$index'. Must be 1 or greater." >&2
+        exit 1
+    fi
     
     # Get entry (0-indexed internally)
-    local entry=$(yq ".history[$((index - 1))]" "$config_file" 2>/dev/null)
+    local entry=$(yq ".history[$((index - 1))]" "$config_file" 2>/dev/null || true)
     
     if [[ -z "$entry" || "$entry" == "null" ]]; then
         echo "Error: No connection found at index $index" >&2
