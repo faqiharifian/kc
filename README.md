@@ -182,5 +182,5 @@ redis:
 ### 3. Spawn utility pods will all the details
 kc will run the following command for redis
 ```bash
-kubectl run util-redis-<gitusername> --rm -it --image redis:latest --restart Never -n $ns --env REDISCLI_AUTH=password123 -- redis-cli -c -h redis-bff-server.consul -p 6379
+kubectl run kc-util-redis-<gitusername> --rm -it --image redis:latest --restart Never -n $ns --env REDISCLI_AUTH=password123 -- redis-cli -c -h redis-bff-server.consul -p 6379
 ```

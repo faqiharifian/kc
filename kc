@@ -11,13 +11,12 @@ function show_help() {
 Usage: kc [options] <command> [<args>]
 
 Commands:
-    hist [last|<n>]  Show connection history, or reconnect to last or #n
-    pg               Connect to PostgreSQL database
-    mongo            Connect to MongoDB database
-    redis            Connect to Redis database
-    util             Create a utility pod in the specified namespace
-    cleanup          Delete utility pods in all namespaces set in config file
-    <anycommand>     Execute whatever command you give. Usually used with -c/--context option.
+    pg              Connect to PostgreSQL database
+    mongo           Connect to MongoDB database
+    redis           Connect to Redis database
+    util            Create a utility deployment in the specified namespace
+    cleanup         Delete utility deployments in all namespaces set in config file
+    <anycommand>    Execute whatever command you give. Usually used with -c/--context option.
 
 Use "kc help <command>" for more information about a command.
 
@@ -31,7 +30,7 @@ Options:
     -v, --verbose   Enable verbose mode to print commands being executed.
 
 Description:
-  A helper script to connect to various databases using utility pod.
+  A helper script to connect to various databases using utility deployment.
 EOF
 }
 
@@ -48,7 +47,7 @@ Options:
                     If not specified, the current context will be used.
     -pf, --port-forward
                     Enable port forwarding for the PostgreSQL database.
-                    This will create a pod that forwards the PostgreSQL port to your local machine.
+                    This will create a deployment that forwards the PostgreSQL port to your local machine.
                     You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
                     The default port is 15432, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
      -v, --verbose  Enable verbose mode to print commands being executed.
@@ -71,7 +70,7 @@ Options:
                     If not specified, the current context will be used.
     -pf, --port-forward
                     Enable port forwarding for the PostgreSQL database.
-                    This will create a pod that forwards the PostgreSQL port to your local machine.
+                    This will create a deployment that forwards the PostgreSQL port to your local machine.
                     You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
                     The default port is 127017, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
      -v, --verbose  Enable verbose mode to print commands being executed.
@@ -94,7 +93,7 @@ Options:
                     If not specified, the current context will be used.
     -pf, --port-forward
                     Enable port forwarding for the PostgreSQL database.
-                    This will create a pod that forwards the PostgreSQL port to your local machine.
+                    This will create a deployment that forwards the PostgreSQL port to your local machine.
                     You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
                     The default port is 16379, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
      -v, --verbose  Enable verbose mode to print commands being executed.
@@ -116,7 +115,7 @@ Options:
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
 Description:
-  Create a utility pod in the specified namespace.
+  Create a utility deployment in the specified namespace.
   If no namespace is specified, it will use the first namespace found in the config file.
   The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
   If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
@@ -282,10 +281,56 @@ function resolve_config_for_subcommand() {
     echo "$subcommand_config"
 }
 
-function normalize_pod_name() {
-    local pod_name="$1"
-    local normalized_name=$(echo "$pod_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+function normalize_name() {
+    local name="$1"
+    local normalized_name=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
     echo "$normalized_name"
+}
+
+# All deployments created by this script are prefixed with "kc-" so they are
+# easy to tell apart from real workloads (and easy to clean up).
+function normalize_deployment_name() {
+    echo "kc-$(normalize_name "$1")"
+}
+
+function create_deployment() {
+    local deployname="$1"
+    local ns="$2"
+    local image="$3"
+    local envs="${4:-}"
+
+    kubectl delete deployment "$deployname" -n "$ns" --ignore-not-found=true
+
+    cmd=$(echo "kubectl create deployment $deployname --image $image -n $ns -- sleep 86400")
+    print_command "$cmd"
+    eval $cmd
+
+    if [[ -n "$envs" ]]; then
+        cmd=$(echo "kubectl set env deployment/$deployname -n $ns $envs")
+        print_command "$cmd"
+        eval $cmd
+    fi
+
+    cmd=$(echo "kubectl rollout status deployment/$deployname -n $ns")
+    print_command "$cmd"
+    eval $cmd
+}
+
+function delete_deployment() {
+    local deployname="$1"
+    local ns="$2"
+    kubectl delete deployment "$deployname" -n "$ns" --ignore-not-found=true
+}
+
+# Make sure the deployment is deleted even if the script is interrupted (Ctrl-C,
+# terminal closed, kill) or exits with an error.
+function delete_deployment_on_exit() {
+    local deployname="$1"
+    local ns="$2"
+    trap "delete_deployment $deployname $ns" EXIT
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
 }
 
 function connect_pg() {
@@ -319,22 +364,22 @@ function connect_pg() {
         pfport="15432"
     fi
 
-    local podname=$(normalize_pod_name "util-pg-$app_name-$git_user")
-    kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+    local deployname=$(normalize_deployment_name "util-pg-$app_name-$git_user")
     persist_namespace "$ns"
-    record_connection "pg" "$app_name" "$ns"
+    delete_deployment_on_exit "$deployname" "$ns"
 
     if [[ "$PF" == true ]]; then
-        port_forward $podname $ns $host $port $pfport
+        port_forward $deployname $ns $host $port $pfport
         return
     fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to PostgreSQL database using pod: '$podname' in ns: '$ns'..."
-    cmd=$(echo "kubectl run $podname --rm -it --image postgres:16 --restart Never -n $ns --env PGPASSWORD=$password --env PGCONNECT_TIMEOUT=30 -- psql -U $user -h $host $dbname")
+    echo "Connecting to PostgreSQL database using deployment: '$deployname' in ns: '$ns'..."
+    create_deployment "$deployname" "$ns" "postgres:16" "PGPASSWORD=$password PGCONNECT_TIMEOUT=30"
+    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- psql -U $user -h $host $dbname")
     print_command "$cmd"
-    eval $cmd
+    eval $cmd || true
 }
 
 function connect_mongo() {
@@ -372,22 +417,22 @@ function connect_mongo() {
         pfport="127017"
     fi
 
-    local podname=$(normalize_pod_name "util-mongo-$app_name-$git_user")
-    kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+    local deployname=$(normalize_deployment_name "util-mongo-$app_name-$git_user")
     persist_namespace "$ns"
-    record_connection "mongo" "$app_name" "$ns"
+    delete_deployment_on_exit "$deployname" "$ns"
 
     if [[ "$PF" == true ]]; then
-        port_forward $podname $ns $host $port $pfport
+        port_forward $deployname $ns $host $port $pfport
         return
     fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to MongoDB database using pod: '$podname' in ns: '$ns'..."
-    cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
+    echo "Connecting to MongoDB database using deployment: '$deployname' in ns: '$ns'..."
+    create_deployment "$deployname" "$ns" "arunvelsriram/utils"
+    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
     print_command "$cmd"
-    eval $cmd
+    eval $cmd || true
 }
 
 function connect_redis() {
@@ -423,23 +468,22 @@ function connect_redis() {
         pfport="16379"
     fi
 
-    local podname=$(normalize_pod_name "util-redis-$app_name-$git_user")
-    kubectl delete pod "$podname" -n "$ns" --ignore-not-found=true
+    local deployname=$(normalize_deployment_name "util-redis-$app_name-$git_user")
     persist_namespace "$ns"
-    record_connection "redis" "$app_name" "$ns"
+    delete_deployment_on_exit "$deployname" "$ns"
 
     if [[ "$PF" == true ]]; then
-        port_forward $podname $ns $host $port $pfport
+        port_forward $deployname $ns $host $port $pfport
         return
     fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to Redis database using pod: '$podname' in ns: '$ns'..."
-    cmd=$(echo "kubectl run $podname --rm -it --image redis:latest --restart Never -n $ns --env REDISCLI_AUTH=$password -- redis-cli -c -h $host -p $port")
-    echo "Press 'Shift + r' to run redis-cli command after 'If you don't see a command prompt, try pressing enter.'"
+    echo "Connecting to Redis database using deployment: '$deployname' in ns: '$ns'..."
+    create_deployment "$deployname" "$ns" "redis:latest" "REDISCLI_AUTH=$password"
+    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- redis-cli -c -h $host -p $port")
     print_command "$cmd"
-    eval $cmd
+    eval $cmd || true
 }
 
 function connect_util() {
@@ -450,50 +494,52 @@ function connect_util() {
         ns="a$(printf '%06d' "$ns")"
     fi
 
-    local podname=$(normalize_pod_name "util-$user")
-    kubectl delete pod "$podname" -n $ns --ignore-not-found=true
+    local deployname=$(normalize_deployment_name "util-$user")
     persist_namespace "$ns"
+    delete_deployment_on_exit "$deployname" "$ns"
 
-    echo "Creating utility pod: $podname in namespace '$ns'..."
-    cmd=$(echo "kubectl run $podname --rm -it --image arunvelsriram/utils --restart Never -n $ns bash")
+    echo "Creating utility deployment: $deployname in namespace '$ns'..."
+    create_deployment "$deployname" "$ns" "arunvelsriram/utils"
+    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- bash")
     print_command "$cmd"
-    eval $cmd
+    eval $cmd || true
 }
 
 function port_forward() {
-    local podname=$1
+    local deployname=$1
     local ns=$2
     local host=$3
     local port=$4
     local pfport=$5
 
-    kubectl run $podname --image alpine/socat --restart Never -n $ns -- TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port
-    kubectl wait --for=condition=Ready pod/$podname -n $ns
-    kubectl port-forward -n $ns pod/$podname $pfport:$port; kubectl delete pod $podname -n $ns
+    kubectl delete deployment $deployname -n $ns --ignore-not-found=true
+    kubectl create deployment $deployname --image alpine/socat -n $ns -- socat TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port
+    kubectl rollout status deployment/$deployname -n $ns
+    kubectl port-forward -n $ns deployment/$deployname $pfport:$port
 }
 
 function cleanup() {
     local config=$(load_namespaces_config)
     local user=$(git config --get user.name)
-    user=$(normalize_pod_name "$user")
+    user=$(normalize_name "$user")
     local contexts=$(echo "$config" | yq ".pod_namespaces | keys | .[]" 2>/dev/null || true)
 
     echo ""
-    echo "Starting cleanup of utility pods..."
+    echo "Starting cleanup of utility deployments..."
     local pids=()  # Array to store background process IDs
 
     for ctx in $contexts; do
         switch_context "$ctx"
         local namespaces=$(echo "$config" | yq ".pod_namespaces.\"$ctx\"[]" 2>/dev/null || true)
         for ns in $namespaces; do
-            local pods=$(kubectl get pods -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "util.*$user")
-            if [[ -z "$pods" ]]; then
+            local deployments=$(kubectl get deployments -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "^(kc-)?util.*$user")
+            if [[ -z "$deployments" ]]; then
                 continue
             fi
             echo "ctx: $ctx, ns: $ns"
-            for pod in $pods; do
-                echo "  - Deleting $pod (background)"
-                kubectl delete pod "$pod" -n "$ns" --ignore-not-found=true &
+            for deployment in $deployments; do
+                echo "  - Deleting $deployment (background)"
+                kubectl delete deployment "$deployment" -n "$ns" --ignore-not-found=true &
                 pids+=($!)
             done
         done
@@ -506,7 +552,7 @@ function cleanup() {
         for pid in "${pids[@]}"; do
             wait "$pid"
         done
-        echo "All pod deletions completed."
+        echo "All deployment deletions completed."
     fi
 
     # Clear out all pod_namespaces from the config file
@@ -529,7 +575,7 @@ function record_connection() {
     local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
     local current_context=$(kubectl config current-context)
     local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    
+
     # Prepend to history array, then limit to configured entries
     local tmpfile=$(mktemp)
     yq ".history = [{\"timestamp\": \"$now\", \"context\": \"$current_context\", \"type\": \"$db_type\", \"app\": \"$app_name\", \"namespace\": \"$ns\"}] + (.history // [])" "$config_file" | yq ".history |= .[0:$HISTORY_LIMIT]" > "$tmpfile"
@@ -549,7 +595,7 @@ function calculate_time_ago() {
     local now_epoch
     now_epoch=$(date -u +"%s")
     local diff=$((now_epoch - then_epoch))
-    
+
     if [[ $diff -lt 60 ]]; then
         echo "${diff}s ago"
     elif [[ $diff -lt 3600 ]]; then
@@ -564,28 +610,28 @@ function calculate_time_ago() {
 function show_history() {
     local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
     local history_count=$(yq ".history | length" "$config_file" 2>/dev/null || true)
-    
+
     if [[ -z "$history_count" || "$history_count" == "null" || "$history_count" == "0" ]]; then
         echo ""
         echo "No connection history found."
         echo ""
         return
     fi
-    
+
     echo ""
     echo "Recent Connections:"
     echo "-------------------"
-    
+
     local index=0
     while [[ $index -lt $history_count ]]; do
         local timestamp=$(yq ".history[$index].timestamp" "$config_file")
         local context=$(yq ".history[$index].context" "$config_file")
         local type=$(yq ".history[$index].type" "$config_file")
         local app=$(yq ".history[$index].app" "$config_file")
-        
+
         # Calculate "time ago"
         local time_ago=$(calculate_time_ago "$timestamp")
-        
+
         printf "[%d] %-10s | %-70s | %-6s | %s\n" "$((index + 1))" "$time_ago" "$context" "$type" "$app"
         index=$((index + 1))
     done
@@ -595,7 +641,7 @@ function show_history() {
 function reconnect_from_history() {
     local index="${1:-1}"  # Default to 1 (last connection)
     local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
-    
+
     # Validate index is numeric
     if ! [[ "$index" =~ ^[0-9]+$ ]]; then
         echo "Error: Invalid index '$index'. Must be a number." >&2
@@ -607,27 +653,27 @@ function reconnect_from_history() {
         echo "Error: Invalid index '$index'. Must be 1 or greater." >&2
         exit 1
     fi
-    
+
     # Get entry (0-indexed internally)
     local entry=$(yq ".history[$((index - 1))]" "$config_file" 2>/dev/null || true)
-    
+
     if [[ -z "$entry" || "$entry" == "null" ]]; then
         echo "Error: No connection found at index $index" >&2
         echo "Run 'kc hist' to see available connections." >&2
         exit 1
     fi
-    
+
     # Extract connection details
     local context=$(echo "$entry" | yq ".context")
     local type=$(echo "$entry" | yq ".type")
     local app=$(echo "$entry" | yq ".app")
-    
+
     echo ""
     echo "Reconnecting to: $type/$app (context: $context)..."
-    
+
     # Switch context and reconnect
     switch_context "$context"
-    
+
     case "$type" in
         pg) connect_pg "$app" ;;
         mongo) connect_mongo "$app" ;;
