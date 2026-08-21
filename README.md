@@ -91,6 +91,11 @@ kubectl config rename-context gke_project_dev dev
 Create a config file at `<path-to-kc>/.kc/config.yaml` with the following structure:
 
 ```yaml
+# General settings. Optional.
+config:
+  # How long a utility job lives, in seconds. Defaults to 86400 (24 hours).
+  # The job stops itself after this long even if kc never gets to clean up.
+  ttl: 86400
 # Map of context aliases to full context names.
 ctxs:
   dev: gke_project_dev
@@ -189,4 +194,4 @@ kubectl create job kc-util-redis-<gitusername> --image redis:latest -n $ns --dry
 kubectl wait --for=condition=Ready pod -l job-name=kc-util-redis-<gitusername> -n $ns --timeout=10s
 kubectl exec -it job/kc-util-redis-<gitusername> -n $ns -- redis-cli -c -h redis-bff-server.consul -p 6379
 ```
-The job is deleted when you exit the session, including on Ctrl-C or when the terminal is closed. As a backstop it also deletes itself 24 hours after creation, even if kc never gets the chance to clean up.
+The job is deleted when you exit the session, including on Ctrl-C or when the terminal is closed. As a backstop it also deletes itself 24 hours after creation, even if kc never gets the chance to clean up. Set `config.ttl` to change that window; the value replaces `86400` in both places above.

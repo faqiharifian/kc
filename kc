@@ -6,7 +6,8 @@ VERBOSE=false
 PF=false
 # Utility jobs delete themselves this long after creation, even if kc never
 # gets the chance to clean up (kill -9, crash, machine gone).
-TTL=86400
+# Override with `config.ttl` in ~/.kc/config.yaml.
+DEFAULT_TTL=86400
 
 function show_help() {
     cat <<'EOF'
@@ -121,7 +122,8 @@ Description:
   If no namespace is specified, it will use the first namespace found in the config file.
   The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
   If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
-  The job deletes itself 24 hours after creation.
+  The job deletes itself 24 hours after creation, or after `config.ttl`
+  seconds if that is set in ~/.kc/config.yaml.
 EOF
 }
 
@@ -169,6 +171,20 @@ function load_config() {
         exit 1
     fi
     yq "$config_file"
+}
+
+# Job lifetime in seconds, from `config.ttl` if set, otherwise $DEFAULT_TTL.
+function resolve_ttl() {
+    local ttl=$(load_config | yq ".config.ttl")
+    if [[ -z "$ttl" || "$ttl" == "null" ]]; then
+        echo "$DEFAULT_TTL"
+        return
+    fi
+    if ! [[ "$ttl" =~ ^[0-9]+$ ]] || [[ "$ttl" -le 0 ]]; then
+        echo "Invalid 'config.ttl' in config file: '$ttl'. Must be a positive integer (seconds)." >&2
+        exit 1
+    fi
+    echo "$ttl"
 }
 
 function validate_config() {
@@ -285,15 +301,19 @@ function normalize_job_name() {
     echo "kc-$(normalize_name "$1")"
 }
 
-# activeDeadlineSeconds stops the job after $TTL, ttlSecondsAfterFinished then
-# lets the cluster delete it. backoffLimit 0 keeps a failed pod from being
+# activeDeadlineSeconds stops the job after the TTL, ttlSecondsAfterFinished
+# then lets the cluster delete it. backoffLimit 0 keeps a failed pod from being
 # replaced under an open session.
 function create_job() {
     local jobname="$1"
     local ns="$2"
     local image="$3"
     local envs="${4:-}"
-    local command="${5:-sleep $TTL}"
+    # Split from the declaration: `local ttl=$(...)` would mask resolve_ttl's
+    # exit status, so an invalid config.ttl would slip through as an empty value.
+    local ttl
+    ttl=$(resolve_ttl) || exit 1
+    local command="${5:-sleep $ttl}"
 
     kubectl delete job "$jobname" -n "$ns" --ignore-not-found=true
 
@@ -302,7 +322,7 @@ function create_job() {
         set_env="kubectl set env --local -f - -o yaml $envs"
     fi
 
-    cmd=$(echo "kubectl create job $jobname --image $image -n $ns --dry-run=client -o yaml -- $command | $set_env | yq '.spec.activeDeadlineSeconds = $TTL | .spec.ttlSecondsAfterFinished = 0 | .spec.backoffLimit = 0' | kubectl apply -f -")
+    cmd=$(echo "kubectl create job $jobname --image $image -n $ns --dry-run=client -o yaml -- $command | $set_env | yq '.spec.activeDeadlineSeconds = $ttl | .spec.ttlSecondsAfterFinished = 0 | .spec.backoffLimit = 0' | kubectl apply -f -")
     print_command "$cmd"
     eval $cmd
 
