@@ -9,7 +9,7 @@ PF=false
 TTL=86400
 
 function show_help() {
-    cat << EOF
+    cat <<'EOF'
 Usage: kc [options] <command> [<args>]
 
 Commands:
@@ -37,7 +37,7 @@ EOF
 }
 
 function show_help_pg() {
-    cat << EOF
+    cat <<'EOF'
 Usage: kc [options] pg <app-name>
 
 Options:
@@ -60,7 +60,7 @@ EOF
 }
 
 function show_help_mongo() {
-    cat << EOF
+    cat <<'EOF'
 Usage: kc [options] mongo <app-name>
 
 Options:
@@ -83,7 +83,7 @@ EOF
 }
 
 function show_help_redis() {
-    cat << EOF
+    cat <<'EOF'
 Usage: kc [options] redis <app-name>
 
 Options:
@@ -106,7 +106,7 @@ EOF
 }
 
 function show_help_util() {
-    cat << EOF
+    cat <<'EOF'
 Usage: kc [options] util [<namespace>]
 
 Options:
