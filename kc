@@ -5,6 +5,9 @@ IFS=$'\n\t'
 VERBOSE=false
 PF=false
 HISTORY_LIMIT=9
+# Utility jobs delete themselves this long after creation, even if kc never
+# gets the chance to clean up (kill -9, crash, machine gone).
+TTL=86400
 
 function show_help() {
     cat << EOF
@@ -14,8 +17,8 @@ Commands:
     pg              Connect to PostgreSQL database
     mongo           Connect to MongoDB database
     redis           Connect to Redis database
-    util            Create a utility deployment in the specified namespace
-    cleanup         Delete utility deployments in all namespaces set in config file
+    util            Create a utility job in the specified namespace
+    cleanup         Delete utility jobs in all namespaces set in config file
     <anycommand>    Execute whatever command you give. Usually used with -c/--context option.
 
 Use "kc help <command>" for more information about a command.
@@ -30,7 +33,7 @@ Options:
     -v, --verbose   Enable verbose mode to print commands being executed.
 
 Description:
-  A helper script to connect to various databases using utility deployment.
+  A helper script to connect to various databases using utility job.
 EOF
 }
 
@@ -47,7 +50,7 @@ Options:
                     If not specified, the current context will be used.
     -pf, --port-forward
                     Enable port forwarding for the PostgreSQL database.
-                    This will create a deployment that forwards the PostgreSQL port to your local machine.
+                    This will create a job that forwards the PostgreSQL port to your local machine.
                     You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
                     The default port is 15432, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
      -v, --verbose  Enable verbose mode to print commands being executed.
@@ -70,7 +73,7 @@ Options:
                     If not specified, the current context will be used.
     -pf, --port-forward
                     Enable port forwarding for the PostgreSQL database.
-                    This will create a deployment that forwards the PostgreSQL port to your local machine.
+                    This will create a job that forwards the PostgreSQL port to your local machine.
                     You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
                     The default port is 127017, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
      -v, --verbose  Enable verbose mode to print commands being executed.
@@ -93,7 +96,7 @@ Options:
                     If not specified, the current context will be used.
     -pf, --port-forward
                     Enable port forwarding for the PostgreSQL database.
-                    This will create a deployment that forwards the PostgreSQL port to your local machine.
+                    This will create a job that forwards the PostgreSQL port to your local machine.
                     You can then connect to the database using `psql -h localhost -p <port> -U <user> <dbname>`.
                     The default port is 16379, but you can change it by setting the `pfport` field in ~/.kc/config.yaml.
      -v, --verbose  Enable verbose mode to print commands being executed.
@@ -115,10 +118,11 @@ Options:
                     Context can be in full form or alias form set in ~/.kc/config.yaml
                     If not specified, the current context will be used.
 Description:
-  Create a utility deployment in the specified namespace.
+  Create a utility job in the specified namespace.
   If no namespace is specified, it will use the first namespace found in the config file.
   The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
   If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
+  The job deletes itself 24 hours after creation.
 EOF
 }
 
@@ -168,6 +172,7 @@ function load_config() {
     yq "$config_file"
 }
 
+# Bootstraps ~/.kc/usage.yaml, which is where connection history is kept.
 function load_namespaces_config() {
     local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
     if [[ ! -f "$config_file" ]]; then
@@ -287,47 +292,75 @@ function normalize_name() {
     echo "$normalized_name"
 }
 
-# All deployments created by this script are prefixed with "kc-" so they are
+# All jobs created by this script are prefixed with "kc-" so they are
 # easy to tell apart from real workloads (and easy to clean up).
-function normalize_deployment_name() {
+function normalize_job_name() {
     echo "kc-$(normalize_name "$1")"
 }
 
-function create_deployment() {
-    local deployname="$1"
+# activeDeadlineSeconds stops the job after $TTL, ttlSecondsAfterFinished then
+# lets the cluster delete it. backoffLimit 0 keeps a failed pod from being
+# replaced under an open session.
+function create_job() {
+    local jobname="$1"
     local ns="$2"
     local image="$3"
     local envs="${4:-}"
+    local command="${5:-sleep $TTL}"
 
-    kubectl delete deployment "$deployname" -n "$ns" --ignore-not-found=true
+    kubectl delete job "$jobname" -n "$ns" --ignore-not-found=true
 
-    cmd=$(echo "kubectl create deployment $deployname --image $image -n $ns -- sleep 86400")
-    print_command "$cmd"
-    eval $cmd
-
+    local set_env="cat"
     if [[ -n "$envs" ]]; then
-        cmd=$(echo "kubectl set env deployment/$deployname -n $ns $envs")
-        print_command "$cmd"
-        eval $cmd
+        set_env="kubectl set env --local -f - -o yaml $envs"
     fi
 
-    cmd=$(echo "kubectl rollout status deployment/$deployname -n $ns")
+    cmd=$(echo "kubectl create job $jobname --image $image -n $ns --dry-run=client -o yaml -- $command | $set_env | yq '.spec.activeDeadlineSeconds = $TTL | .spec.ttlSecondsAfterFinished = 0 | .spec.backoffLimit = 0' | kubectl apply -f -")
     print_command "$cmd"
     eval $cmd
+
+    wait_for_job "$jobname" "$ns"
 }
 
-function delete_deployment() {
-    local deployname="$1"
+# A job has no rollout status, so wait for its pod. The pod does not exist yet
+# right after apply, so retry until it shows up.
+function wait_for_job() {
+    local jobname="$1"
     local ns="$2"
-    kubectl delete deployment "$deployname" -n "$ns" --ignore-not-found=true
+    local attempt=0
+
+    cmd=$(echo "kubectl wait --for=condition=Ready pod -l job-name=$jobname -n $ns --timeout=10s")
+    print_command "$cmd"
+    while [[ $attempt -lt 30 ]]; do
+        if eval $cmd &> /dev/null; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+
+    echo "Timed out waiting for job '$jobname' to be ready in namespace '$ns'." >&2
+    exit 1
 }
 
-# Make sure the deployment is deleted even if the script is interrupted (Ctrl-C,
+function job_pod() {
+    local jobname="$1"
+    local ns="$2"
+    kubectl get pod -l job-name="$jobname" -n "$ns" -o jsonpath='{.items[0].metadata.name}'
+}
+
+function delete_job() {
+    local jobname="$1"
+    local ns="$2"
+    kubectl delete job "$jobname" -n "$ns" --ignore-not-found=true
+}
+
+# Make sure the job is deleted even if the script is interrupted (Ctrl-C,
 # terminal closed, kill) or exits with an error.
-function delete_deployment_on_exit() {
-    local deployname="$1"
+function delete_job_on_exit() {
+    local jobname="$1"
     local ns="$2"
-    trap "delete_deployment $deployname $ns" EXIT
+    trap "delete_job $jobname $ns" EXIT
     trap 'exit 130' INT
     trap 'exit 129' HUP
     trap 'exit 143' TERM
@@ -364,20 +397,19 @@ function connect_pg() {
         pfport="15432"
     fi
 
-    local deployname=$(normalize_deployment_name "util-pg-$app_name-$git_user")
-    persist_namespace "$ns"
-    delete_deployment_on_exit "$deployname" "$ns"
+    local jobname=$(normalize_job_name "util-pg-$app_name-$git_user")
+    delete_job_on_exit "$jobname" "$ns"
 
     if [[ "$PF" == true ]]; then
-        port_forward $deployname $ns $host $port $pfport
+        port_forward $jobname $ns $host $port $pfport
         return
     fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to PostgreSQL database using deployment: '$deployname' in ns: '$ns'..."
-    create_deployment "$deployname" "$ns" "postgres:16" "PGPASSWORD=$password PGCONNECT_TIMEOUT=30"
-    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- psql -U $user -h $host $dbname")
+    echo "Connecting to PostgreSQL database using job: '$jobname' in ns: '$ns'..."
+    create_job "$jobname" "$ns" "postgres:16" "PGPASSWORD=$password PGCONNECT_TIMEOUT=30"
+    cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- psql -U $user -h $host $dbname")
     print_command "$cmd"
     eval $cmd || true
 }
@@ -417,20 +449,19 @@ function connect_mongo() {
         pfport="127017"
     fi
 
-    local deployname=$(normalize_deployment_name "util-mongo-$app_name-$git_user")
-    persist_namespace "$ns"
-    delete_deployment_on_exit "$deployname" "$ns"
+    local jobname=$(normalize_job_name "util-mongo-$app_name-$git_user")
+    delete_job_on_exit "$jobname" "$ns"
 
     if [[ "$PF" == true ]]; then
-        port_forward $deployname $ns $host $port $pfport
+        port_forward $jobname $ns $host $port $pfport
         return
     fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to MongoDB database using deployment: '$deployname' in ns: '$ns'..."
-    create_deployment "$deployname" "$ns" "arunvelsriram/utils"
-    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
+    echo "Connecting to MongoDB database using job: '$jobname' in ns: '$ns'..."
+    create_job "$jobname" "$ns" "arunvelsriram/utils"
+    cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
     print_command "$cmd"
     eval $cmd || true
 }
@@ -468,20 +499,19 @@ function connect_redis() {
         pfport="16379"
     fi
 
-    local deployname=$(normalize_deployment_name "util-redis-$app_name-$git_user")
-    persist_namespace "$ns"
-    delete_deployment_on_exit "$deployname" "$ns"
+    local jobname=$(normalize_job_name "util-redis-$app_name-$git_user")
+    delete_job_on_exit "$jobname" "$ns"
 
     if [[ "$PF" == true ]]; then
-        port_forward $deployname $ns $host $port $pfport
+        port_forward $jobname $ns $host $port $pfport
         return
     fi
 
     echo ""
     echo "Current context: $(kubectl config current-context)"
-    echo "Connecting to Redis database using deployment: '$deployname' in ns: '$ns'..."
-    create_deployment "$deployname" "$ns" "redis:latest" "REDISCLI_AUTH=$password"
-    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- redis-cli -c -h $host -p $port")
+    echo "Connecting to Redis database using job: '$jobname' in ns: '$ns'..."
+    create_job "$jobname" "$ns" "redis:latest" "REDISCLI_AUTH=$password"
+    cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- redis-cli -c -h $host -p $port")
     print_command "$cmd"
     eval $cmd || true
 }
@@ -494,52 +524,57 @@ function connect_util() {
         ns="a$(printf '%06d' "$ns")"
     fi
 
-    local deployname=$(normalize_deployment_name "util-$user")
-    persist_namespace "$ns"
-    delete_deployment_on_exit "$deployname" "$ns"
+    local jobname=$(normalize_job_name "util-$user")
+    delete_job_on_exit "$jobname" "$ns"
 
-    echo "Creating utility deployment: $deployname in namespace '$ns'..."
-    create_deployment "$deployname" "$ns" "arunvelsriram/utils"
-    cmd=$(echo "kubectl exec -it deployment/$deployname -n $ns -- bash")
+    echo "Creating utility job: $jobname in namespace '$ns'..."
+    create_job "$jobname" "$ns" "arunvelsriram/utils"
+    cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- bash")
     print_command "$cmd"
     eval $cmd || true
 }
 
 function port_forward() {
-    local deployname=$1
+    local jobname=$1
     local ns=$2
     local host=$3
     local port=$4
     local pfport=$5
 
-    kubectl delete deployment $deployname -n $ns --ignore-not-found=true
-    kubectl create deployment $deployname --image alpine/socat -n $ns -- socat TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port
-    kubectl rollout status deployment/$deployname -n $ns
-    kubectl port-forward -n $ns deployment/$deployname $pfport:$port
+    create_job "$jobname" "$ns" "alpine/socat" "" "socat TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port"
+
+    # port-forward does not accept job/<name>, so resolve the pod behind it
+    local pod=$(job_pod "$jobname" "$ns")
+    cmd=$(echo "kubectl port-forward -n $ns pod/$pod $pfport:$port")
+    print_command "$cmd"
+    eval $cmd
 }
 
 function cleanup() {
-    local config=$(load_namespaces_config)
+    local config=$(load_config)
     local user=$(git config --get user.name)
     user=$(normalize_name "$user")
-    local contexts=$(echo "$config" | yq ".pod_namespaces | keys | .[]" 2>/dev/null || true)
+    local contexts=$(echo "$config" | yq ".ctxs | .[]" 2>/dev/null || true)
+    if [[ -z "$contexts" || "$contexts" == "null" ]]; then
+        contexts=$(kubectl config current-context)
+    fi
+    local namespaces=$(echo "$config" | yq ".apps[].namespace" 2>/dev/null | sort | uniq)
 
     echo ""
-    echo "Starting cleanup of utility deployments..."
+    echo "Starting cleanup of utility jobs..."
     local pids=()  # Array to store background process IDs
 
     for ctx in $contexts; do
         switch_context "$ctx"
-        local namespaces=$(echo "$config" | yq ".pod_namespaces.\"$ctx\"[]" 2>/dev/null || true)
         for ns in $namespaces; do
-            local deployments=$(kubectl get deployments -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "^(kc-)?util.*$user")
-            if [[ -z "$deployments" ]]; then
+            local jobs=$(kubectl get jobs -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -E "^(kc-)?util.*$user")
+            if [[ -z "$jobs" ]]; then
                 continue
             fi
             echo "ctx: $ctx, ns: $ns"
-            for deployment in $deployments; do
-                echo "  - Deleting $deployment (background)"
-                kubectl delete deployment "$deployment" -n "$ns" --ignore-not-found=true &
+            for job in $jobs; do
+                echo "  - Deleting $job (background)"
+                kubectl delete job "$job" -n "$ns" --ignore-not-found=true &
                 pids+=($!)
             done
         done
@@ -552,16 +587,8 @@ function cleanup() {
         for pid in "${pids[@]}"; do
             wait "$pid"
         done
-        echo "All deployment deletions completed."
+        echo "All job deletions completed."
     fi
-
-    # Clear out all pod_namespaces from the config file
-    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
-    tmpfile=$(mktemp)
-
-    # Keep only the first line (header), delete the rest
-    head -n 1 "$config_file" > "$tmpfile"
-    mv "$tmpfile" "$config_file"
 }
 
 function first_namespace() {
@@ -569,6 +596,7 @@ function first_namespace() {
 }
 
 function record_connection() {
+    load_namespaces_config > /dev/null
     local db_type="$1"
     local app_name="$2"
     local ns="$3"
@@ -680,47 +708,6 @@ function reconnect_from_history() {
         redis) connect_redis "$app" ;;
         *) echo "Unknown database type: $type" >&2; exit 1 ;;
     esac
-}
-
-function persist_namespace() {
-    load_namespaces_config > /dev/null
-    local ns="$1"
-    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/usage.yaml"
-
-    # Check if last_used is older than 1 day, and call cleanup if so
-    if yq 'has("last_used")' "$config_file" | grep -q true; then
-        last_used=$(yq '.last_used' "$config_file")
-        if [[ -n "$last_used" && "$last_used" != "null" ]]; then
-            last_used_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$last_used" +"%s" 2>/dev/null || date -d "$last_used" +"%s")
-            now_epoch=$(date -u +"%s")
-            if [[ $((now_epoch - last_used_epoch)) -gt 86400 ]]; then
-                cleanup
-            fi
-        fi
-    fi
-
-    # Store current time (ISO 8601) as last_used for this namespace/context
-    local now
-    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    tmpfile=$(mktemp)
-    yq ".last_used = \"$now\"" "$config_file" > "$tmpfile"
-    mv "$tmpfile" "$config_file"
-
-    # Get current context
-    local current_context
-    current_context=$(kubectl config current-context)
-
-    # Check if namespace exists in the current Kubernetes cluster
-    if ! kubectl get namespace "$ns" &>/dev/null; then
-        return
-    fi
-
-    # Append namespace to pod_namespaces for the current context if not already present
-    if ! yq ".pod_namespaces.\"$current_context\"[]" "$config_file" 2>/dev/null | grep -Fxq "$ns"; then
-        tmpfile=$(mktemp)
-        yq ".pod_namespaces.\"$current_context\" += [\"$ns\"] | .pod_namespaces.\"$current_context\" |= unique" "$config_file" > "$tmpfile"
-        mv "$tmpfile" "$config_file"
-    fi
 }
 
 if [[ $# -eq 0 ]]; then

@@ -1,11 +1,11 @@
 # KC
 
-A helper script to connect to various databases and manage utility pods in Kubernetes clusters.
+A helper script to connect to various databases and manage utility jobs in Kubernetes clusters.
 
 ## Features
-- Connect to PostgreSQL, MongoDB, and Redis databases through kubernetes pod easily.
+- Connect to PostgreSQL, MongoDB, and Redis databases through kubernetes job easily.
 - **No need to store DB credentials in your local**
-- Clean up utility pods you own across namespaces from your config.
+- Clean up utility jobs you own across namespaces from your config.
 - Supports context switching using context aliases from your config.
 
 ## Requirements
@@ -42,8 +42,8 @@ kc [options] <subcommand> [args]
 - `pg <app-name>`      Connect to PostgreSQL database of the specified app.
 - `mongo <app-name>`   Connect to MongoDB database of the specified app.
 - `redis <app-name>`   Connect to Redis database of the specified app.
-- `util <namespace>`   Create a utility pod in the specified namespace.
-- `cleanup`            Delete all utility pods you own across all namespaces defined in your config.
+- `util <namespace>`   Create a utility job in the specified namespace.
+- `cleanup`            Delete all utility jobs you own across all namespaces defined in your config.
 - `<anycommand>`       Execute whatever command you want. Usually used with -c/--context option.
 
 ### Examples
@@ -63,12 +63,12 @@ Connect to Redis:
 kc redis spal
 ```
 
-Create a utility pod in a namespace:
+Create a utility job in a namespace:
 ```sh
 kc util a000096
 ```
 
-Clean up your utility pods:
+Clean up your utility jobs:
 ```sh
 kc cleanup
 ```
@@ -179,8 +179,14 @@ redis:
   host: redis-sirspamalot-write.service.i-cgk.consul # coming from CACHE_MASTER_REDIS_HOST env variable
   password: password123 # coming from CACHE_REDIS_PASSWORD env variable
 ```
-### 3. Spawn utility pods will all the details
-kc will run the following command for redis
+### 3. Spawn utility jobs will all the details
+kc will run the following commands for redis
 ```bash
-kubectl run kc-util-redis-<gitusername> --rm -it --image redis:latest --restart Never -n $ns --env REDISCLI_AUTH=password123 -- redis-cli -c -h redis-bff-server.consul -p 6379
+kubectl create job kc-util-redis-<gitusername> --image redis:latest -n $ns --dry-run=client -o yaml -- sleep 86400 \
+  | kubectl set env --local -f - -o yaml REDISCLI_AUTH=password123 \
+  | yq '.spec.activeDeadlineSeconds = 86400 | .spec.ttlSecondsAfterFinished = 0 | .spec.backoffLimit = 0' \
+  | kubectl apply -f -
+kubectl wait --for=condition=Ready pod -l job-name=kc-util-redis-<gitusername> -n $ns --timeout=10s
+kubectl exec -it job/kc-util-redis-<gitusername> -n $ns -- redis-cli -c -h redis-bff-server.consul -p 6379
 ```
+The job is deleted when you exit the session, including on Ctrl-C or when the terminal is closed. As a backstop it also deletes itself 24 hours after creation, even if kc never gets the chance to clean up.
