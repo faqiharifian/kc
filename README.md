@@ -194,6 +194,17 @@ redis:
   host: redis-sirspamalot-write.service.i-cgk.consul # coming from CACHE_MASTER_REDIS_HOST env variable
   password: password123 # coming from CACHE_REDIS_PASSWORD env variable
 ```
+
+A value only goes through this lookup when it names an env variable that the
+deployment's container actually has. Anything else is used as written, so you
+can hardcode a field the deployment does not expose - like `mpgw` above, whose
+redis host is the literal `gateway-redis-master`. The two can be mixed freely
+within one app:
+```yaml
+redis:
+  host: gateway-redis-master   # used as-is
+  password: CACHE_REDIS_PASSWORD # read from the deployment
+```
 ### 3. Spawn utility jobs will all the details
 kc will run the following commands for redis
 ```bash

@@ -311,16 +311,41 @@ function resolve_config_for_subcommand() {
         exit 1
     fi
     local env_vars=$(echo "$deployment" | yq ".items | map(select(.metadata.name | test(\"$deployment_name\"))) | .[0].spec.template.spec.containers | map(select(.name | test (\"$deployment_name\"))) | .[0].env | map({.name:.value}) | .[]")
-    while IFS=":" read -r key value; do
-        key=$(echo "$key" | xargs)
-        value=$(echo "$value" | xargs)
 
-        resolved_value=$(echo "$env_vars" | yq ".$value")
+    resolve_env_refs "$subcommand_config" "$env_vars"
+}
 
-        subcommand_config=$(echo "$subcommand_config" | sed "s/: $value/: $(printf '%s\n' "$resolved_value" | sed 's/[&/\]/\\&/g')/g")
-    done <<< "$subcommand_config"
+# Each value in an app's db config is either the name of an env variable on the
+# deployment or a literal value. A value that names an env variable is swapped
+# for that variable's value; anything else is left exactly as written, so a
+# static host/port/password in config.yaml survives.
+#
+# Keys and values go through yq's strenv() rather than being interpolated into
+# a path expression, so values containing '.', '-' or ':' (hostnames, host:port
+# pairs, passwords) are looked up literally instead of being parsed as yq paths.
+function resolve_env_refs() {
+    local config="$1"
+    local env_vars="$2"
 
-    echo "$subcommand_config"
+    if [[ -z "$config" || "$config" == "null" ]]; then
+        echo "$config"
+        return 0
+    fi
+
+    local key value
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+
+        value=$(K="$key" yq '.[strenv(K)]' <<< "$config")
+        if [[ "$(V="$value" yq 'has(strenv(V))' <<< "$env_vars")" != "true" ]]; then
+            continue
+        fi
+
+        value=$(V="$value" yq '.[strenv(V)]' <<< "$env_vars")
+        config=$(K="$key" V="$value" yq '.[strenv(K)] = strenv(V)' <<< "$config")
+    done < <(yq 'keys | .[]' <<< "$config")
+
+    echo "$config"
 }
 
 function normalize_name() {
@@ -552,7 +577,13 @@ function connect_redis() {
     echo ""
     echo "Current context: $(kubectl config current-context)"
     echo "Connecting to Redis database using job: '$jobname' in ns: '$ns'..."
-    create_job "$jobname" "$ns" "redis" "REDISCLI_AUTH=$password"
+    # password is optional for redis. Passing REDISCLI_AUTH through unset would
+    # make redis-cli send the literal string "null" as the password.
+    local envs=""
+    if [[ -n "$password" && "$password" != "null" ]]; then
+        envs="REDISCLI_AUTH=$password"
+    fi
+    create_job "$jobname" "$ns" "redis" "$envs"
     cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- redis-cli -c -h $host -p $port")
     print_command "$cmd"
     eval $cmd || true
