@@ -96,6 +96,16 @@ config:
   # How long a utility job lives, in seconds. Defaults to 86400 (24 hours).
   # The job stops itself after this long even if kc never gets to clean up.
   ttl: 86400
+  # Image used for each kind of utility job. Every key is optional and
+  # independent; any key you omit keeps the default shown here.
+  images:
+    pg: postgres:latest
+    mongo: arunvelsriram/utils
+    redis: redis:latest
+    util: arunvelsriram/utils
+    # -pf/--port-forward runs socat instead of the database client, so it uses
+    # this image rather than images.pg/mongo/redis.
+    pf: alpine/socat
 # Map of context aliases to full context names.
 ctxs:
   dev: gke_project_dev
@@ -195,3 +205,5 @@ kubectl wait --for=condition=Ready pod -l job-name=kc-util-redis-<gitusername> -
 kubectl exec -it job/kc-util-redis-<gitusername> -n $ns -- redis-cli -c -h redis-bff-server.consul -p 6379
 ```
 The job is deleted when you exit the session, including on Ctrl-C or when the terminal is closed. As a backstop it also deletes itself 24 hours after creation, even if kc never gets the chance to clean up. Set `config.ttl` to change that window; the value replaces `86400` in both places above.
+
+`redis:latest` above is likewise the default, replaced by `config.images.redis` when that is set. Each command has its own key (`pg`, `mongo`, `redis`, `util`, and `pf` for the socat image `-pf` uses), so overriding one leaves the others alone.

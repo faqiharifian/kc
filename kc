@@ -8,6 +8,13 @@ PF=false
 # gets the chance to clean up (kill -9, crash, machine gone).
 # Override with `config.ttl` in ~/.kc/config.yaml.
 DEFAULT_TTL=86400
+# Images used for utility jobs. Override any of them with `config.images.<name>`
+# in ~/.kc/config.yaml.
+DEFAULT_IMAGE_PG=postgres:latest
+DEFAULT_IMAGE_MONGO=arunvelsriram/utils
+DEFAULT_IMAGE_REDIS=redis:latest
+DEFAULT_IMAGE_UTIL=arunvelsriram/utils
+DEFAULT_IMAGE_PF=alpine/socat
 
 function show_help() {
     cat <<'EOF'
@@ -57,6 +64,8 @@ Options:
 
 Description:
   Connect to PostgreSQL database of the specified app.
+  The job runs `postgres:latest`, or `config.images.pg` if that is set in
+  ~/.kc/config.yaml. With -pf it runs `config.images.pf` instead.
 EOF
 }
 
@@ -80,6 +89,8 @@ Options:
 
 Description:
   Connect to MongoDB database of the specified app.
+  The job runs `arunvelsriram/utils`, or `config.images.mongo` if that is set in
+  ~/.kc/config.yaml. With -pf it runs `config.images.pf` instead.
 EOF
 }
 
@@ -103,6 +114,8 @@ Options:
 
 Description:
   Connect to Redis database of the specified app.
+  The job runs `redis:latest`, or `config.images.redis` if that is set in
+  ~/.kc/config.yaml. With -pf it runs `config.images.pf` instead.
 EOF
 }
 
@@ -122,6 +135,8 @@ Description:
   If no namespace is specified, it will use the first namespace found in the config file.
   The namespace can be in full form(e.g., 'a000096') or in short form(e.g., '96').
   If the namespace is in short form, it will be converted to full form by prefixing 'a' and padding with zeros.
+  The job runs `arunvelsriram/utils`, or `config.images.util` if that is set in
+  ~/.kc/config.yaml.
   The job deletes itself 24 hours after creation, or after `config.ttl`
   seconds if that is set in ~/.kc/config.yaml.
 EOF
@@ -185,6 +200,25 @@ function resolve_ttl() {
         exit 1
     fi
     echo "$ttl"
+}
+
+# Image for a job of the given purpose, from `config.images.<purpose>` if set,
+# otherwise $DEFAULT_IMAGE_<PURPOSE>.
+function resolve_image() {
+    local purpose="$1"
+    local image=$(load_config | yq ".config.images.$purpose")
+    if [[ -z "$image" || "$image" == "null" ]]; then
+        local default_var="DEFAULT_IMAGE_$(echo "$purpose" | tr '[:lower:]' '[:upper:]')"
+        echo "${!default_var}"
+        return
+    fi
+    # $image is interpolated unquoted into the eval'd command in create_job, so
+    # anything outside a valid image reference has to be rejected here.
+    if ! [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]]; then
+        echo "Invalid 'config.images.$purpose' in config file: '$image'. Must be a valid image reference." >&2
+        exit 1
+    fi
+    echo "$image"
 }
 
 function validate_config() {
@@ -307,12 +341,13 @@ function normalize_job_name() {
 function create_job() {
     local jobname="$1"
     local ns="$2"
-    local image="$3"
+    local purpose="$3"
     local envs="${4:-}"
-    # Split from the declaration: `local ttl=$(...)` would mask resolve_ttl's
-    # exit status, so an invalid config.ttl would slip through as an empty value.
-    local ttl
+    # Split from the declaration: `local ttl=$(...)` would mask the resolver's
+    # exit status, so an invalid config value would slip through as empty.
+    local ttl image
     ttl=$(resolve_ttl) || exit 1
+    image=$(resolve_image "$purpose") || exit 1
     local command="${5:-sleep $ttl}"
 
     kubectl delete job "$jobname" -n "$ns" --ignore-not-found=true
@@ -415,7 +450,7 @@ function connect_pg() {
     echo ""
     echo "Current context: $(kubectl config current-context)"
     echo "Connecting to PostgreSQL database using job: '$jobname' in ns: '$ns'..."
-    create_job "$jobname" "$ns" "postgres:16" "PGPASSWORD=$password PGCONNECT_TIMEOUT=30"
+    create_job "$jobname" "$ns" "pg" "PGPASSWORD=$password PGCONNECT_TIMEOUT=30"
     cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- psql -U $user -h $host $dbname")
     print_command "$cmd"
     eval $cmd || true
@@ -467,7 +502,7 @@ function connect_mongo() {
     echo ""
     echo "Current context: $(kubectl config current-context)"
     echo "Connecting to MongoDB database using job: '$jobname' in ns: '$ns'..."
-    create_job "$jobname" "$ns" "arunvelsriram/utils"
+    create_job "$jobname" "$ns" "mongo"
     cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- mongosh --host $host --port $port -u $user -p $password $dbname")
     print_command "$cmd"
     eval $cmd || true
@@ -517,7 +552,7 @@ function connect_redis() {
     echo ""
     echo "Current context: $(kubectl config current-context)"
     echo "Connecting to Redis database using job: '$jobname' in ns: '$ns'..."
-    create_job "$jobname" "$ns" "redis:latest" "REDISCLI_AUTH=$password"
+    create_job "$jobname" "$ns" "redis" "REDISCLI_AUTH=$password"
     cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- redis-cli -c -h $host -p $port")
     print_command "$cmd"
     eval $cmd || true
@@ -535,7 +570,7 @@ function connect_util() {
     delete_job_on_exit "$jobname" "$ns"
 
     echo "Creating utility job: $jobname in namespace '$ns'..."
-    create_job "$jobname" "$ns" "arunvelsriram/utils"
+    create_job "$jobname" "$ns" "util"
     cmd=$(echo "kubectl exec -it job/$jobname -n $ns -- bash")
     print_command "$cmd"
     eval $cmd || true
@@ -548,7 +583,7 @@ function port_forward() {
     local port=$4
     local pfport=$5
 
-    create_job "$jobname" "$ns" "alpine/socat" "" "socat TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port"
+    create_job "$jobname" "$ns" "pf" "" "socat TCP4-LISTEN:$port,fork,reuseaddr TCP4:$host:$port"
 
     # port-forward does not accept job/<name>, so resolve the pod behind it
     local pod=$(job_pod "$jobname" "$ns")
