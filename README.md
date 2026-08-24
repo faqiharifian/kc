@@ -50,22 +50,22 @@ kc [options] <subcommand> [args]
 
 Connect to PostgreSQL:
 ```sh
-kc pg cev2
+kc pg api
 ```
 
 Connect to MongoDB:
 ```sh
-kc mongo dte
+kc mongo orders
 ```
 
 Connect to Redis:
 ```sh
-kc redis spal
+kc redis sessions
 ```
 
 Create a utility job in a namespace:
 ```sh
-kc util a000096
+kc util sessions
 ```
 
 Clean up your utility jobs:
@@ -75,8 +75,8 @@ kc cleanup
 
 Using context option to switch context before executing subcommand:
 ```sh
-kc -c dev pg cev2             # switch context with alias configured in .kc/config.yaml
-kc -c gke_project_dev pg cev2 # switch context using full context
+kc -c dev pg api             # switch context with alias configured in .kc/config.yaml
+kc -c gke_project_dev pg api # switch context using full context
 
 # Of course you can rename your kube context to a shorter name centraly using the following command
 # kubectl config rename-context <current-context-name> <new-context-name>
@@ -112,11 +112,11 @@ ctxs:
   prod: gke_project_prod
 # Map of app names to their deployment, namespace, and database config.
 apps:
-  cev2:
+  api:
     # deployment is to lookup deployment and container from the cluster.
     # if multiple deployment matched, only use the first one
-    deployment: constraintenricherv2
-    namespace: platform-apps
+    deployment: my-api
+    namespace: backend
     # Postgresql config, map of key to ENV variable key in kubernetes deployment
     # host, user, password and dbname is required. 
     # port is optional with 5432 as default
@@ -126,32 +126,32 @@ apps:
       user: DB_USER
       password: DB_PASSWORD
       dbname: DB_NAME
-  dte:
-    deployment: driver-tier-evaluator-dte-actor
-    namespace: a000151
+  orders:
+    deployment: orders-service
+    namespace: orders
     # MongoDB config, map of key to ENV variable key in kubernetes deployment.
     # host, user, password, dbname is required
     # port is optional with 27017 as default
     mongo:
-      host: MONGO_DB_HOSTS
-      user: MONGO_DB_USERNAME
-      password: MONGO_DB_PASSWORD
-      dbname: MONGO_DB_NAME
-  spal:
-    deployment: sirspamalot-actor-server
-    namespace: a000096
+      host: MONGO_HOST
+      user: MONGO_USER
+      password: MONGO_PASSWORD
+      dbname: MONGO_DBNAME
+  sessions:
+    deployment: sessions-service
+    namespace: sessions
     # Redis config, map of key to ENV variable key in kubernetes deployment.
     # host is required
     # password is optional
     # port is optional with 6379 as default
     redis:
-      host: CACHE_MASTER_REDIS_HOST
-      password: CACHE_REDIS_PASSWORD
-  mpgw:
-    deployment: gateway-kong-kong
-    namespace: mp-gateway
+      host: REDIS_HOST
+      password: REDIS_PASSWORD
+  gateway:
+    deployment: gateway-proxy
+    namespace: gateway
     redis:
-      host: gateway-redis-master
+      host: redis-gateway-master
 ```
 
 ## Behind the scene
@@ -159,51 +159,51 @@ apps:
 kc uses `deployment` to lookup the deployment and cluster from the cluster. Let's say we have the following config
 ```yaml
 apps:
-  spal:
-    deployment: sirspamalot-actor-server
-    namespace: a000096
+  sessions:
+    deployment: sessions-service
+    namespace: sessions
     redis:
-      host: CACHE_MASTER_REDIS_HOST
-      password: CACHE_REDIS_PASSWORD
+      host: REDIS_HOST
+      password: REDIS_PASSWORD
 ```
-Based on above config, kc will look for deployment that has name CONTAINS `sirspamalot-actor-server` and pick the first one.
+Based on above config, kc will look for deployment that has name CONTAINS `sessions-service` and pick the first one.
 
-And then, it will get the environment variable from the container from that deployment which name CONTAINS `sirspamalot-actor-server`.
+And then, it will get the environment variable from the container from that deployment which name CONTAINS `sessions-service`.
 
 The previous config will match with the following deployment
 ```yaml
 kind: Deployment
 metadata:
-  name: sirspamalot-actor-server-92427a6d-10e8
-  namespace: a000096
+  name: sessions-service-92427a6d-10e8
+  namespace: sessions
 spec:
   template:
     spec:
       containers:
-        - name: sirspamalot-actor-server
+        - name: sessions-service
           env:
-            - name: CACHE_MASTER_REDIS_HOST
-              value: redis-sirspamalot-write.service.i-cgk.consul
-            - name: CACHE_REDIS_PASSWORD
+            - name: REDIS_HOST
+              value: redis-sessions.internal
+            - name: REDIS_PASSWORD
               value: password123 # sample value
 ```
 ### 2. Resolve DB config
 kc will resolve to use config from env variable in the deployment.
 ```yaml
 redis:
-  host: redis-sirspamalot-write.service.i-cgk.consul # coming from CACHE_MASTER_REDIS_HOST env variable
-  password: password123 # coming from CACHE_REDIS_PASSWORD env variable
+  host: redis-sessions.internal # coming from REDIS_HOST env variable
+  password: password123 # coming from REDIS_PASSWORD env variable
 ```
 
 A value only goes through this lookup when it names an env variable that the
 deployment's container actually has. Anything else is used as written, so you
-can hardcode a field the deployment does not expose - like `mpgw` above, whose
-redis host is the literal `gateway-redis-master`. The two can be mixed freely
+can hardcode a field the deployment does not expose - like `gateway` above, whose
+redis host is the literal `redis-gateway-master`. The two can be mixed freely
 within one app:
 ```yaml
 redis:
-  host: gateway-redis-master   # used as-is
-  password: CACHE_REDIS_PASSWORD # read from the deployment
+  host: redis-gateway-master   # used as-is
+  password: REDIS_PASSWORD # read from the deployment
 ```
 ### 3. Spawn utility jobs will all the details
 kc will run the following commands for redis
@@ -213,7 +213,7 @@ kubectl create job kc-util-redis-<gitusername> --image redis:latest -n $ns --dry
   | yq '.spec.activeDeadlineSeconds = 86400 | .spec.ttlSecondsAfterFinished = 0 | .spec.backoffLimit = 0' \
   | kubectl apply -f -
 kubectl wait --for=condition=Ready pod -l job-name=kc-util-redis-<gitusername> -n $ns --timeout=10s
-kubectl exec -it job/kc-util-redis-<gitusername> -n $ns -- redis-cli -c -h redis-bff-server.consul -p 6379
+kubectl exec -it job/kc-util-redis-<gitusername> -n $ns -- redis-cli -c -h redis-sessions.internal -p 6379
 ```
 The job is deleted when you exit the session, including on Ctrl-C or when the terminal is closed. As a backstop it also deletes itself 24 hours after creation, even if kc never gets the chance to clean up. Set `config.ttl` to change that window; the value replaces `86400` in both places above.
 
