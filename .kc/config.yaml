@@ -10,6 +10,9 @@ config:
     # Used instead of the database image when -pf/--port-forward is given.
     pf: alpine/socat
 ctxs:
+  # Home context: automatically restored after any command completes.
+  # Remove to disable auto-restoration.
+  home: <context-name>
   <ctx-alias>: <context-name>
 apps:
   <app-alias>:

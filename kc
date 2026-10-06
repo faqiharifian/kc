@@ -42,6 +42,12 @@ Options:
 
 Description:
   A helper script to connect to various databases using utility job.
+
+Home Context:
+  After any command completes, kc automatically restores to the home context if
+  configured. Set the home context in ~/.kc/config.yaml under "ctxs.home".
+  This ensures you always return to your primary context after temporary switches.
+  Example: home: i-marketplace  (restores to the i-marketplace context)
 EOF
 }
 
@@ -182,6 +188,13 @@ function check_dependencies() {
     done
 }
 
+function get_home_context() {
+    local home=$(load_config | yq ".ctxs.home")
+    if [[ -n "$home" && "$home" != "null" ]]; then
+        echo "$home"
+    fi
+}
+
 function switch_context() {
     local context="$1"
     if [[ -z "$context" ]]; then
@@ -199,6 +212,13 @@ function switch_context() {
     fi
 
     kubectl config use-context "$context"
+}
+
+function restore_home_context() {
+    local home=$(get_home_context)
+    if [[ -n "$home" ]]; then
+        switch_context "$home"
+    fi
 }
 
 function load_config() {
@@ -445,11 +465,11 @@ function delete_job() {
 }
 
 # Make sure the job is deleted even if the script is interrupted (Ctrl-C,
-# terminal closed, kill) or exits with an error.
+# terminal closed, kill) or exits with an error. Also restores home context on exit.
 function delete_job_on_exit() {
     local jobname="$1"
     local ns="$2"
-    trap "delete_job $jobname $ns" EXIT
+    trap "delete_job $jobname $ns; restore_home_context" EXIT
     trap 'exit 130' INT
     trap 'exit 129' HUP
     trap 'exit 143' TERM
@@ -748,6 +768,8 @@ function cleanup() {
         done
         echo "All job deletions completed."
     fi
+
+    restore_home_context
 }
 
 function first_namespace() {
@@ -869,5 +891,8 @@ case "$1" in
     *)
         print_command "$@"
         "$@"
+        exit_code=$?
+        restore_home_context
+        exit $exit_code
         ;;
 esac
