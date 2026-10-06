@@ -22,6 +22,7 @@ Usage: kc [options] <command> [<args>]
 
 Commands:
     pg              Connect to PostgreSQL database
+    pgdump          Export PostgreSQL database dump to local file
     mongo           Connect to MongoDB database
     redis           Connect to Redis database
     util            Create a utility job in the specified namespace
@@ -66,6 +67,27 @@ Description:
   Connect to PostgreSQL database of the specified app.
   The job runs `postgres:latest`, or `config.images.pg` if that is set in
   ~/.kc/config.yaml. With -pf it runs `config.images.pf` instead.
+EOF
+}
+
+function show_help_pgdump() {
+    cat <<'EOF'
+Usage: kc [options] pgdump <app-name> [<output-file>]
+
+Options:
+    -c, --context   Specify the Kubernetes context to use.
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+    -<context>      Specify the Kubernetes context to use.
+                    Context can be in full form or alias form set in ~/.kc/config.yaml
+                    If not specified, the current context will be used.
+     -v, --verbose  Enable verbose mode to print commands being executed.
+
+Description:
+  Export PostgreSQL database dump to a local file.
+  The job runs `postgres:latest`, or `config.images.pg` if that is set in ~/.kc/config.yaml.
+  If no output file is specified, the dump will be saved as <app-name>-<timestamp>.sql.
+  The job uses kubectl cp with 100 retries to handle transient network issues.
 EOF
 }
 
@@ -481,6 +503,70 @@ function connect_pg() {
     eval $cmd || true
 }
 
+function connect_pgdump() {
+    local git_user=$(git config --get user.name)
+    local app_name=$1
+    local output_file="${2:-}"
+    local ttl=$(resolve_ttl) || exit 1
+
+    if [[ -z "$output_file" ]]; then
+        local date=$(date +%Y-%m-%d)
+        output_file="${app_name}-${date}.sql"
+    fi
+
+    local app_config=$(load_config_for_app "$app_name")
+    if [[ -z "$app_config" || "$app_config" == "null" ]]; then
+        echo "No configuration found for app '$app_name' in config file." >&2
+        exit 1
+    fi
+    local ns=$(echo "$app_config" | yq ".namespace")
+
+    local config=$(resolve_config_for_subcommand "$app_config" "pg")
+    if [[ -z "$config" || "$config" == "null" ]]; then
+        echo "No pg configuration found for app '$app_name' in config file." >&2
+        exit 1
+    fi
+
+    local host=$(echo "$config" | yq ".host")
+    local port=$(echo "$config" | yq ".port")
+    local user=$(echo "$config" | yq ".user")
+    local password=$(echo "$config" | yq ".password")
+    local dbname=$(echo "$config" | yq ".dbname")
+    if [[ -z "$port" || "$port" == "null" ]]; then
+        port="5432"
+    fi
+
+    local jobname=$(normalize_job_name "util-pgdump-$app_name-$git_user")
+    delete_job_on_exit "$jobname" "$ns"
+
+    echo ""
+    echo "Current context: $(kubectl config current-context)"
+    echo "Exporting PostgreSQL database using job: '$jobname' in ns: '$ns'..."
+    echo "Output file: $output_file"
+
+    # Create job with pgdump command that writes to /tmp/dump.sql
+    create_job "$jobname" "$ns" "pg" "PGPASSWORD=$password" "bash -c 'pg_dump -h $host -p $port -U $user $dbname > /tmp/dump.sql; sleep $ttl'"
+
+    # Wait for the dump to complete
+    sleep 2
+
+    local pod=$(job_pod "$jobname" "$ns")
+
+    # Copy file with 100 retries
+    echo "Copying dump file from pod..."
+    cmd=$(echo "kubectl cp --retries=100 $ns/$pod:/tmp/dump.sql $output_file")
+    print_command "$cmd"
+    if eval $cmd; then
+        echo "Successfully exported database dump to: $output_file"
+        delete_job "$jobname" "$ns"
+        return 0
+    else
+        echo "Failed to copy dump file." >&2
+        delete_job "$jobname" "$ns"
+        exit 1
+    fi
+}
+
 function connect_mongo() {
     local git_user=$(git config --get user.name)
     local app_name=$1
@@ -722,6 +808,13 @@ case "$1" in
         fi
         connect_pg "$2"
         ;;
+    pgdump)
+        if [[ $# -lt 2 || $# -gt 3 ]]; then
+            show_help_pgdump
+            exit 1
+        fi
+        connect_pgdump "$2" "${3:-}"
+        ;;
     mongo)
         if [[ $# -ne 2 ]]; then
             show_help_mongo
@@ -755,6 +848,9 @@ case "$1" in
         case "$2" in
             pg)
                 show_help_pg
+                ;;
+            pgdump)
+                show_help_pgdump
                 ;;
             mongo)
                 show_help_mongo
