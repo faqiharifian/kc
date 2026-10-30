@@ -88,7 +88,7 @@ kubectl config rename-context gke_project_dev dev
 
 ## Configuration
 
-Create a config file at `<path-to-kc>/.kc/config.yaml` with the following structure:
+Create a config file at `~/.config/kc/config.yaml` with the following structure. If that file does not exist, kc falls back to `<path-to-kc>/.kc/config.yaml`.
 
 ```yaml
 # General settings. Optional.

@@ -221,8 +221,18 @@ function restore_home_context() {
     fi
 }
 
+# Config path: ~/.config/kc/config.yaml if present, otherwise <path-to-kc>/.kc/config.yaml.
+function config_file_path() {
+    local user_config_file="$HOME/.config/kc/config.yaml"
+    if [[ -f "$user_config_file" ]]; then
+        echo "$user_config_file"
+        return
+    fi
+    echo "$(which kc | sed s/\\/kc$//g)/.kc/config.yaml"
+}
+
 function load_config() {
-    local config_file="$(which kc | sed s/\\/kc$//g)/.kc/config.yaml"
+    local config_file=$(config_file_path)
     if [[ ! -f "$config_file" ]]; then
         echo "Config file '$config_file' not found." >&2
         exit 1
@@ -266,7 +276,7 @@ function resolve_image() {
 function validate_config() {
     local config=$(load_config)
     if [[ -z "$config" || "$config" == "null" ]]; then
-        echo "Invalid config file '$config_file'." >&2
+        echo "Invalid config file '$(config_file_path)'." >&2
         exit 1
     fi
 
